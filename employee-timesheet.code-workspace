@@ -1,0 +1,12 @@
+{
+	"folders": [
+		{
+			"uri": "vscode-vfs://github/mattmillartech/employee-timesheet"
+		},
+		{
+			"name": "employee-timesheet",
+			"path": "."
+		}
+	],
+	"settings": {}
+}
