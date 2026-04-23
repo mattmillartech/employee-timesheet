@@ -116,6 +116,18 @@ export function EntryPage(): JSX.Element {
     void reload();
   }, [reload]);
 
+  // When the employee changes, wipe any slot state left over from the previous
+  // employee AND reset the smart-default ref so the merged effect re-runs with
+  // clean inputs once the new employee's data lands. Without this, the smart-
+  // default scan happens against the previous employee's persisted slots and
+  // picks the wrong day (e.g. Monday for an employee with no data because the
+  // previous employee had Sunday filled).
+  useEffect(() => {
+    setSlots([]);
+    setPending({});
+    smartDefaultAppliedRef.current = '';
+  }, [selectedTab]);
+
   const slotsByDate = useMemo(() => {
     const map = new Map<string, Slot[]>();
     for (const s of slots) {
