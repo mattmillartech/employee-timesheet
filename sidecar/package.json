@@ -1,0 +1,21 @@
+{
+  "name": "employee-timesheet-sidecar",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Service-account-backed REST API for AI agent access to the timesheet",
+  "main": "server.js",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "async-mutex": "^0.5.0",
+    "express": "^4.21.0",
+    "google-auth-library": "^9.14.0",
+    "googleapis": "^144.0.0",
+    "zod": "^3.23.8"
+  }
+}

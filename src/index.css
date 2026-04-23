@@ -1,0 +1,88 @@
+@import 'tailwindcss';
+@import '@fontsource-variable/geist/index.css';
+@import '@fontsource-variable/geist-mono/index.css';
+
+@theme {
+  --font-sans: 'Geist Variable', ui-sans-serif, system-ui, sans-serif;
+  --font-mono: 'Geist Mono Variable', ui-monospace, 'Cascadia Code', 'Fira Code', monospace;
+
+  /* Nexus palette — light */
+  --color-bg: #f7f3ec;           /* warm beige */
+  --color-surface: #fdfbf6;      /* elevated surface */
+  --color-surface-2: #f1ebdf;    /* input / subtle */
+  --color-fg: #1d1b17;           /* primary text */
+  --color-muted: #7a6f5c;        /* secondary text */
+  --color-border: #e4dcc9;       /* hairlines */
+  --color-primary: #1f8e8e;      /* teal */
+  --color-primary-fg: #ffffff;
+  --color-accent: #c37a1d;       /* warm accent */
+  --color-danger: #b23b3b;
+  --color-success: #3d8a4a;
+}
+
+@media (prefers-color-scheme: dark) {
+  @theme {
+    --color-bg: #16140f;
+    --color-surface: #1f1c16;
+    --color-surface-2: #2a251c;
+    --color-fg: #f4ecdb;
+    --color-muted: #a09480;
+    --color-border: #332d22;
+    --color-primary: #4fc4c4;
+    --color-primary-fg: #0b0a08;
+    --color-accent: #e19949;
+    --color-danger: #e66a6a;
+    --color-success: #6fbd7c;
+  }
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  background-color: var(--color-bg);
+  color: var(--color-fg);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Tabular numerals for time + hour displays */
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Skip-to-content link — focusable-only */
+.skip-to-content {
+  position: absolute;
+  left: -9999px;
+  top: auto;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+}
+.skip-to-content:focus {
+  position: fixed;
+  top: 1rem;
+  left: 1rem;
+  width: auto;
+  height: auto;
+  padding: 0.5rem 1rem;
+  background: var(--color-primary);
+  color: var(--color-primary-fg);
+  z-index: 100;
+  border-radius: 0.375rem;
+}
+
+@media print {
+  body {
+    background: white;
+    color: black;
+  }
+  .no-print {
+    display: none !important;
+  }
+}
