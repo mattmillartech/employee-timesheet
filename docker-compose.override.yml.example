@@ -1,0 +1,16 @@
+# Copy this file to `docker-compose.override.yml` for local development on
+# machines that don't have the Redpill `npm_proxy` network. The override:
+#  - removes the external npm_proxy network requirement
+#  - keeps the 3000:80 port mapping so you can hit http://localhost:3000
+#  - lets you boot the stack without creating the shared docker network
+#
+# `docker-compose.override.yml` is already in .gitignore.
+
+services:
+  timesheet:
+    networks: !reset []
+    # If you don't want the container name collision, override it:
+    # container_name: timesheet-local
+
+networks:
+  npm_proxy: !reset null
