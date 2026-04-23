@@ -1,3 +1,4 @@
+import { useRef } from 'react';
 import { X } from 'lucide-react';
 import clsx from 'clsx';
 import { TimeInput } from './TimeInput';
@@ -14,6 +15,12 @@ export type SlotRowProps = {
   /** Inline error message to show (e.g. "save failed — retry"). */
   error?: string | null;
   onRetry?: () => void;
+  /** Parent registers input elements so it can focus them programmatically. */
+  registerInput?: (field: 'start' | 'end', el: HTMLInputElement | null) => void;
+  /** Fired when the user presses Enter on the End field — parent advances focus. */
+  onEndEnter?: () => void;
+  /** Fired when the user presses Ctrl/Cmd+Enter anywhere in the row — parent adds another slot. */
+  onAddAnother?: () => void;
 };
 
 export function SlotRow({
@@ -24,10 +31,19 @@ export function SlotRow({
   saving,
   error,
   onRetry,
+  registerInput,
+  onEndEnter,
+  onAddAnother,
 }: SlotRowProps): JSX.Element {
   const isBreak = slot.slotType === 'break';
   const complete = isValidHHMM(slot.start) && isValidHHMM(slot.end);
   const hours = complete ? calculateHours(slot.start, slot.end, slot.slotType) : slot.hours;
+
+  const endRef = useRef<HTMLInputElement | null>(null);
+  const assignEndRef = (el: HTMLInputElement | null): void => {
+    endRef.current = el;
+    registerInput?.('end', el);
+  };
 
   return (
     <div
@@ -46,6 +62,7 @@ export function SlotRow({
       </span>
 
       <TimeInput
+        ref={(el) => registerInput?.('start', el)}
         value={slot.start}
         displayMode={displayMode}
         ariaLabel={`${isBreak ? 'Break' : 'Work'} start time`}
@@ -56,6 +73,12 @@ export function SlotRow({
               : 0;
           onChange({ start: v, hours: nextHours });
         }}
+        onAutoComplete={() => {
+          // 4 digits typed → immediately hop to the End field so "0700" and
+          // "1500" can be typed back-to-back without hitting Tab.
+          endRef.current?.focus();
+        }}
+        onCtrlEnter={onAddAnother}
       />
 
       <span className="text-muted select-none" aria-hidden>
@@ -63,6 +86,7 @@ export function SlotRow({
       </span>
 
       <TimeInput
+        ref={assignEndRef}
         value={slot.end}
         displayMode={displayMode}
         ariaLabel={`${isBreak ? 'Break' : 'Work'} end time`}
@@ -73,6 +97,8 @@ export function SlotRow({
               : 0;
           onChange({ end: v, hours: nextHours });
         }}
+        onEnter={onEndEnter}
+        onCtrlEnter={onAddAnother}
       />
 
       <span

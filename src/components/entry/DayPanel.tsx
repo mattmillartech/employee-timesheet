@@ -13,6 +13,11 @@ export type DayPanelProps = {
   onSlotDelete: (slotId: string) => void;
   onSlotRetry: (slotId: string) => void;
   onAddSlot: (slotType: 'work' | 'break') => void;
+  registerInputFor?: (
+    slotId: string,
+  ) => (field: 'start' | 'end', el: HTMLInputElement | null) => void;
+  onEndEnter?: (slotId: string) => void;
+  onAddAnother?: () => void;
 };
 
 export function DayPanel({
@@ -24,6 +29,9 @@ export function DayPanel({
   onSlotDelete,
   onSlotRetry,
   onAddSlot,
+  registerInputFor,
+  onEndEnter,
+  onAddAnother,
 }: DayPanelProps): JSX.Element {
   const d = parseISODate(date);
   const heading = d ? format(d, 'EEEE, MMMM d, yyyy') : date;
@@ -57,6 +65,9 @@ export function DayPanel({
                   onChange={(partial) => onSlotChange(slot.slotId, partial)}
                   onDelete={() => onSlotDelete(slot.slotId)}
                   onRetry={() => onSlotRetry(slot.slotId)}
+                  registerInput={registerInputFor?.(slot.slotId)}
+                  onEndEnter={() => onEndEnter?.(slot.slotId)}
+                  onAddAnother={onAddAnother}
                 />
               </li>
             );

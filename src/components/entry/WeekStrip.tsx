@@ -26,13 +26,12 @@ export function WeekStrip({
       aria-label="Week days"
       className="grid grid-cols-7 gap-2"
       onKeyDown={(e) => {
-        if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+        const isPrev = e.key === 'ArrowLeft' || e.key === 'ArrowUp';
+        const isNext = e.key === 'ArrowRight' || e.key === 'ArrowDown';
+        if (!isPrev && !isNext) return;
         e.preventDefault();
         const idx = days.findIndex((d) => toISODate(d) === selectedDate);
-        const next =
-          e.key === 'ArrowRight'
-            ? Math.min(6, idx + 1)
-            : Math.max(0, idx - 1);
+        const next = isNext ? Math.min(6, idx + 1) : Math.max(0, idx - 1);
         const day = days[next];
         if (day) onSelect(toISODate(day));
       }}
@@ -46,7 +45,7 @@ export function WeekStrip({
           <button
             key={iso}
             role="tab"
-            aria-selected={isSelected}
+            aria-selected={isSelected ? 'true' : 'false'}
             tabIndex={isSelected ? 0 : -1}
             type="button"
             onClick={() => onSelect(iso)}

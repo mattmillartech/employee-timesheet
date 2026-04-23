@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { ChevronLeft, ChevronRight, Calendar } from 'lucide-react';
 import { useSheet } from '@/contexts/SheetContext';
@@ -12,7 +12,6 @@ import {
   deleteRow as clearRow,
   readEmployeeSlots,
   slotToRowDerived,
-  toISODate,
   updateRow,
 } from '@/lib/sheetsApi';
 import { dayAbbrev, formatWeekRange, parseISODate } from '@/lib/dateUtils';
@@ -22,6 +21,15 @@ import type { Slot, SlotType } from '@/types';
 
 type PendingState = { saving?: boolean; error?: string | null };
 type PendingMap = Record<string, PendingState>;
+type FocusTarget = { slotId: string; field: 'start' | 'end' };
+
+function Kbd({ children }: { children: React.ReactNode }): JSX.Element {
+  return (
+    <kbd className="inline-block px-1.5 py-0.5 rounded border border-border bg-surface text-fg font-mono text-[11px] leading-none align-middle mr-1 last:mr-0">
+      {children}
+    </kbd>
+  );
+}
 
 function newSlot(date: string, slotType: SlotType): Slot {
   const day = (() => {
@@ -55,6 +63,33 @@ export function EntryPage(): JSX.Element {
   const [pending, setPending] = useState<PendingMap>({});
 
   const week = useWeekNav(settings.timezone);
+
+  // Ref registry — SlotRow calls registerInput(slotId, field, el) on mount/unmount,
+  // EntryPage uses it to programmatically focus the "next logical field".
+  const inputRefs = useRef<Map<string, HTMLInputElement>>(new Map());
+  const pendingFocusRef = useRef<FocusTarget | null>(null);
+  // Tracks whether we've applied the smart-default-day pick for the current
+  // (employee, week) combo — prevents us from fighting the user on every render.
+  const smartDefaultAppliedRef = useRef<string>('');
+
+  const registerInputFor = useCallback(
+    (slotId: string) => (field: 'start' | 'end', el: HTMLInputElement | null): void => {
+      const key = `${slotId}:${field}`;
+      if (el) inputRefs.current.set(key, el);
+      else inputRefs.current.delete(key);
+    },
+    [],
+  );
+
+  const focusSlot = useCallback((target: FocusTarget): boolean => {
+    const el = inputRefs.current.get(`${target.slotId}:${target.field}`);
+    if (el) {
+      el.focus();
+      el.select();
+      return true;
+    }
+    return false;
+  }, []);
 
   // Pick a sensible default employee when active list changes.
   useEffect(() => {
@@ -94,23 +129,46 @@ export function EntryPage(): JSX.Element {
     return map;
   }, [slots]);
 
-  // Smart default day selection: the first day in the current week with no entries.
+  // Smart default day: on employee/week change, jump to the first day of this
+  // week that has no entries. If every day is populated, leave Sunday selected.
   useEffect(() => {
-    if (!week.weekDaysISO.includes(week.selectedDate)) return;
-    const emptyDay = week.weekDaysISO.find(
-      (iso) => (slotsByDate.get(iso)?.length ?? 0) === 0,
-    );
-    if (emptyDay && week.selectedDate !== emptyDay) {
-      // Only auto-pick if the currently selected day has entries AND a more
-      // natural empty day is available — don't fight the user.
-      const currentHasEntries = (slotsByDate.get(week.selectedDate)?.length ?? 0) > 0;
-      if (!currentHasEntries) return;
-      // Intentionally not auto-advancing; preserve the user's selection.
+    if (loading || !selectedTab) return;
+    const key = `${selectedTab}:${week.weekDaysISO[0] ?? ''}`;
+    if (smartDefaultAppliedRef.current === key) return;
+    for (const iso of week.weekDaysISO) {
+      if ((slotsByDate.get(iso)?.length ?? 0) === 0) {
+        if (week.selectedDate !== iso) week.setSelectedDate(iso);
+        smartDefaultAppliedRef.current = key;
+        return;
+      }
     }
-    // Intentional no-op below — kept for clarity that smart selection only
-    // fires on initial load, not on every slot change.
-    void emptyDay;
-  }, [slotsByDate, week.selectedDate, week.weekDaysISO]);
+    smartDefaultAppliedRef.current = key;
+  }, [loading, selectedTab, slotsByDate, week]);
+
+  // Auto-add one empty work slot whenever the selected day has none — so the
+  // admin lands on a ready-to-type row without clicking "Add work slot".
+  useEffect(() => {
+    if (loading || !selectedTab) return;
+    const current = slotsByDate.get(week.selectedDate) ?? [];
+    if (current.length === 0) {
+      const fresh = newSlot(week.selectedDate, 'work');
+      setSlots((prev) => [...prev, fresh]);
+      pendingFocusRef.current = { slotId: fresh.slotId, field: 'start' };
+    }
+  }, [loading, selectedTab, week.selectedDate, slotsByDate]);
+
+  // Consume pendingFocusRef after each render — the new input has had a chance
+  // to mount and register itself, so we can now focus it.
+  useEffect(() => {
+    if (!pendingFocusRef.current) return;
+    const target = pendingFocusRef.current;
+    const id = window.setTimeout(() => {
+      if (focusSlot(target)) {
+        pendingFocusRef.current = null;
+      }
+    }, 0);
+    return () => window.clearTimeout(id);
+  });
 
   const markPending = (slotId: string, next: PendingState): void => {
     setPending((prev) => ({ ...prev, [slotId]: { ...prev[slotId], ...next } }));
@@ -139,7 +197,6 @@ export function EntryPage(): JSX.Element {
       });
       try {
         if (slot.rowIndex === undefined) {
-          // Append. After append, re-read to get the fresh rowIndex for this row.
           await run((t) => appendRows(sheetId, selectedTab, [row], t, EMPLOYEE_RANGE));
           await reload();
         } else {
@@ -201,11 +258,72 @@ export function EntryPage(): JSX.Element {
   );
 
   const handleAddSlot = useCallback(
-    (slotType: SlotType): void => {
+    (slotType: SlotType): Slot => {
       const fresh = newSlot(week.selectedDate, slotType);
       setSlots((prev) => [...prev, fresh]);
+      pendingFocusRef.current = { slotId: fresh.slotId, field: 'start' };
+      return fresh;
     },
     [week.selectedDate],
+  );
+
+  // Ctrl+Enter inside any slot row — add another work slot to the same day and
+  // immediately focus its Start field.
+  const handleAddAnother = useCallback((): void => {
+    handleAddSlot('work');
+  }, [handleAddSlot]);
+
+  // Enter on the End field — save (already committed via TimeInput), then
+  // advance focus to the next logical field:
+  //   1. A later slot on this day with an empty Start or End
+  //   2. Otherwise, the next day in the week that has no entries (auto-adds an
+  //      empty work slot via the day-change effect)
+  //   3. If every day has entries, add a fresh slot to the current day
+  const handleEndEnter = useCallback(
+    (fromSlotId: string): void => {
+      const currentDaySlots = slotsByDate.get(week.selectedDate) ?? [];
+      const idx = currentDaySlots.findIndex((s) => s.slotId === fromSlotId);
+      for (let i = idx + 1; i < currentDaySlots.length; i++) {
+        const s = currentDaySlots[i];
+        if (!s) continue;
+        if (!isValidHHMM(s.start)) {
+          pendingFocusRef.current = { slotId: s.slotId, field: 'start' };
+          return;
+        }
+        if (!isValidHHMM(s.end)) {
+          pendingFocusRef.current = { slotId: s.slotId, field: 'end' };
+          return;
+        }
+      }
+      // No more incomplete slots on this day — advance to the next day that
+      // either has no entries OR has an incomplete slot.
+      const days = week.weekDaysISO;
+      const currentIdx = days.indexOf(week.selectedDate);
+      for (let step = 1; step <= days.length; step++) {
+        const nextIdx = (currentIdx + step) % days.length;
+        const nextDate = days[nextIdx];
+        if (!nextDate) continue;
+        const list = slotsByDate.get(nextDate) ?? [];
+        if (list.length === 0) {
+          week.setSelectedDate(nextDate);
+          // Day-change effect will auto-add the empty slot + set pendingFocus.
+          return;
+        }
+        const incomplete = list.find((s) => !isValidHHMM(s.start) || !isValidHHMM(s.end));
+        if (incomplete) {
+          week.setSelectedDate(nextDate);
+          pendingFocusRef.current = {
+            slotId: incomplete.slotId,
+            field: isValidHHMM(incomplete.start) ? 'end' : 'start',
+          };
+          return;
+        }
+      }
+      // Every day in this week has complete entries. Add a new slot here so
+      // the user can keep typing without hunting for the "Add slot" button.
+      handleAddSlot('work');
+    },
+    [slotsByDate, week, handleAddSlot],
   );
 
   const handleSlotRetry = useCallback(
@@ -318,19 +436,54 @@ export function EntryPage(): JSX.Element {
           onSlotChange={handleSlotChange}
           onSlotDelete={handleSlotDelete}
           onSlotRetry={handleSlotRetry}
-          onAddSlot={handleAddSlot}
+          onAddSlot={(type) => void handleAddSlot(type)}
+          registerInputFor={registerInputFor}
+          onEndEnter={handleEndEnter}
+          onAddAnother={handleAddAnother}
         />
       )}
 
-      <p className="text-xs text-muted">
-        Saved on blur of the End time field. {' '}
-        <kbd className="px-1 py-0.5 rounded bg-surface-2 border border-border text-xs">
-          ← / →
-        </kbd>{' '}
-        to change day.
-      </p>
-
-      <span className="sr-only">{toISODate(week.sunday)}</span>
+      <aside
+        aria-label="Keyboard shortcuts"
+        className="rounded-lg border border-border/70 bg-surface-2/60 p-3 text-xs no-print"
+      >
+        <div className="font-medium text-fg mb-2">Keyboard shortcuts</div>
+        <ul className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-1.5 text-muted">
+          <li>
+            <Kbd>0700</Kbd>
+            <span className="ml-2">
+              Type 4 digits — auto-formats to <span className="font-mono">07:00</span> and
+              hops to the End field
+            </span>
+          </li>
+          <li>
+            <Kbd>Tab</Kbd>
+            <span className="ml-2">Start → End within the same slot</span>
+          </li>
+          <li>
+            <Kbd>Enter</Kbd>
+            <span className="ml-2">
+              Save + advance to next empty field (next day once this day is done)
+            </span>
+          </li>
+          <li>
+            <Kbd>Ctrl</Kbd>
+            <Kbd>Enter</Kbd>
+            <span className="ml-2">Add another slot to the current day</span>
+          </li>
+          <li>
+            <Kbd>Esc</Kbd>
+            <span className="ml-2">Cancel current edit, revert to saved value</span>
+          </li>
+          <li>
+            <Kbd>←</Kbd>
+            <Kbd>↑</Kbd>
+            <Kbd>↓</Kbd>
+            <Kbd>→</Kbd>
+            <span className="ml-2">Change day (from the week strip)</span>
+          </li>
+        </ul>
+      </aside>
     </section>
   );
 }

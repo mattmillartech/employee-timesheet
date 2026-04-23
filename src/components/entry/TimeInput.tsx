@@ -24,15 +24,20 @@ export type TimeInputProps = {
   disabled?: boolean;
   onEnter?: () => void;
   onEscape?: () => void;
+  /** Fired the moment the user finishes the 4th digit that produces a valid HH:MM. */
+  onAutoComplete?: () => void;
+  /** Fired on Ctrl+Enter / Meta+Enter — handled at the row level to add another slot. */
+  onCtrlEnter?: () => void;
 };
 
 export const TimeInput = forwardRef<HTMLInputElement, TimeInputProps>(function TimeInput(
-  { value, onCommit, displayMode, placeholder = 'HH:MM', ariaLabel, className, disabled, onEnter, onEscape },
+  { value, onCommit, displayMode, placeholder = 'HH:MM', ariaLabel, className, disabled, onEnter, onEscape, onAutoComplete, onCtrlEnter },
   ref,
 ) {
   const [draft, setDraft] = useState<string>(value ? formatForDisplay(value, displayMode) : '');
   const [focused, setFocused] = useState(false);
   const lastCommittedRef = useRef<string>(value);
+  const lastDigitsCountRef = useRef<number>(0);
 
   // Sync external value into the draft when not focused.
   useEffect(() => {
@@ -66,7 +71,11 @@ export const TimeInput = forwardRef<HTMLInputElement, TimeInputProps>(function T
     if (e.key === 'Enter') {
       e.preventDefault();
       commit(draft);
-      onEnter?.();
+      if ((e.ctrlKey || e.metaKey) && onCtrlEnter) {
+        onCtrlEnter();
+      } else {
+        onEnter?.();
+      }
     }
   };
 
@@ -83,6 +92,7 @@ export const TimeInput = forwardRef<HTMLInputElement, TimeInputProps>(function T
       value={focused ? draft : value ? formatForDisplay(value, displayMode) : ''}
       onFocus={(e) => {
         setFocused(true);
+        lastDigitsCountRef.current = (draft.match(/\d/g) ?? []).length;
         // Select everything so a fresh type replaces the value.
         setTimeout(() => e.target.select(), 0);
       }}
@@ -94,7 +104,21 @@ export const TimeInput = forwardRef<HTMLInputElement, TimeInputProps>(function T
         const raw = e.target.value;
         // Only keep digits / colon / space / AM / PM for readable display
         const cleaned = raw.replace(/[^\d:apm\s]/gi, '');
-        setDraft(autoFormat4Digit(cleaned));
+        const formatted = autoFormat4Digit(cleaned);
+        setDraft(formatted);
+        // Auto-commit + fire onAutoComplete the moment we reach 4 digits and the
+        // result is a valid HH:MM. This makes "0700[Tab-less]" flow possible —
+        // the parent wires onAutoComplete on Start → focus End.
+        const digitsCount = (cleaned.match(/\d/g) ?? []).length;
+        if (
+          digitsCount >= 4 &&
+          lastDigitsCountRef.current < 4 &&
+          isValidHHMM(formatted)
+        ) {
+          commit(formatted);
+          onAutoComplete?.();
+        }
+        lastDigitsCountRef.current = digitsCount;
       }}
       onKeyDown={handleKeyDown}
       className={clsx(
