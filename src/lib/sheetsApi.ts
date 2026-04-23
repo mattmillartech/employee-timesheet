@@ -706,8 +706,15 @@ export async function initOrRebuildDashboardTab(
                     showTotals: false,
                     sortOrder: 'ASCENDING',
                     label: 'Date',
+                    // Sheets API's PivotTable.DateTimeRuleType enum does NOT
+                    // include a week-bucket option — week grouping is a UI-
+                    // only feature applied via manual bucket editing. We
+                    // default to YEAR_MONTH_DAY (one row per distinct date)
+                    // and the user can switch to YEAR_MONTH / YEAR_QUARTER /
+                    // YEAR / DAY_OF_WEEK directly from the pivot editor panel
+                    // if they want a rolled-up view.
                     groupRule: {
-                      dateTimeRule: { type: 'ISO_YEAR_WEEK' },
+                      dateTimeRule: { type: 'YEAR_MONTH_DAY' },
                     },
                   },
                 ],
