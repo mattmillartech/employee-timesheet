@@ -85,7 +85,7 @@ The `@rigour-labs/cli` hook runs on every Write / Edit / MultiEdit and blocks co
 
 Production deploys happen via the `timesheet` Portainer stack on Redpill (endpoint id 3). The stack is git-based — Portainer pulls this repo from GitHub and builds on Redpill. Secrets live in Portainer stack env, not on disk. Full deploy procedure: see the build plan's M7 section.
 
-Credential: Bitwarden item `f1f9422f-75da-4a86-9476-5c796c53be38` ("Portainer - Redpill").
+Credential: Bitwarden item "Portainer - Redpill" (look up the UUID via `bw list items --search "portainer"` — UUIDs belong in the private vault, not a public repo).
 
 ---
 
