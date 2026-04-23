@@ -1,0 +1,66 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git diff*)",
+      "Bash(git log*)",
+      "Bash(git rev-parse*)",
+      "Bash(git status*)",
+      "Bash(git show*)",
+      "Read(~/.vault/**)",
+      "Write(~/.vault/**)",
+      "Edit(~/.vault/**)",
+      "Read(C:/Users/mattm/.vault/**)",
+      "Write(C:/Users/mattm/.vault/**)",
+      "Edit(C:/Users/mattm/.vault/**)",
+      "Bash(cd /c/Users/mattm/.vault && git *)",
+      "Bash(cd ~/.vault && git *)"
+    ],
+    "deny": [
+      "Bash(git push --force origin main*)",
+      "Bash(git push -f origin main*)",
+      "Bash(git reset --hard origin/main*)"
+    ],
+    "ask": [],
+    "additionalDirectories": [
+      "C:/Users/mattm/.vault",
+      "C:/Users/mattm/.vault/brain/gotchas",
+      "C:/Users/mattm/.vault/brain/decisions",
+      "C:/Users/mattm/.vault/brain/patterns",
+      "C:/Users/mattm/.vault/work/active",
+      "C:/Users/mattm/.vault/agents/claude/daily",
+      "~/.vault"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "npx @rigour-labs/cli hooks check --files \"$TOOL_INPUT_file_path\" --block"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "npx @rigour-labs/cli hooks check --mode dlp --stdin"
+          }
+        ]
+      }
+    ]
+  },
+  "mcpServers": {
+    "rigour": {
+      "command": "npx",
+      "args": [
+        "@rigour-labs/mcp@2.9"
+      ]
+    }
+  }
+}
