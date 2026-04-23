@@ -4,7 +4,7 @@ Self-hosted employee hours tracking — a React + TypeScript webapp backed by a
 single Google Sheet, with a tiny Express sidecar so AI agents can read / write
 hours programmatically. Deployed via Docker + Nginx behind Portainer on a VPS.
 
-- **Live (target):** https://timesheet.redpill.online
+- **Live (target):** `https://<your-deploy-host>` — set via reverse proxy
 - **Backend data store:** Google Sheet (one tab per employee + a `_Config` tab
   + a live-formula `Dashboard` tab). No server-side database.
 - **Human sign-in:** Google Identity Services token flow, gated by an email
@@ -77,14 +77,14 @@ docs/DEPLOY.md · docs/api-examples.sh
 
 All free at single-user scale — you do **not** need to add a billing card.
 
-1. Create a Google Cloud project, e.g. `millar-timesheet`.
+1. Create a Google Cloud project, e.g. `your-timesheet-project-id`.
 2. Enable the **Google Sheets API** and **Google Drive API**
    (APIs & Services → Library → search → Enable).
 3. Create an OAuth 2.0 client:
    - Type: **Web application**
    - Authorized JavaScript origins:
      - `http://localhost:5173` (dev)
-     - `https://timesheet.redpill.online` (prod)
+     - `https://timesheet.example.com` (prod)
    - Copy the Client ID — it's `VITE_GOOGLE_CLIENT_ID` in your env.
 4. Create a Service Account:
    - IAM & Admin → Service Accounts → Create.
@@ -163,17 +163,16 @@ npm run build                 # production bundle
 ## Deploy
 
 See [`docs/DEPLOY.md`](docs/DEPLOY.md) for the full runbook (DNS →
-OAuth origins → Portainer git-based stack on Redpill → NPM proxy host →
+OAuth origins → Portainer git-based stack → reverse-proxy host →
 smoke tests). Brief summary:
 
-1. Add an A record: `timesheet.redpill.online → 161.97.187.50`.
-2. Add `https://timesheet.redpill.online` to the OAuth client origins.
+1. Add an A record pointing your deployment hostname at your VPS IP (or reuse an existing wildcard record).
+2. Add `https://<your-deploy-host>` to the OAuth client's Authorized JavaScript origins.
 3. Create a git-based Portainer stack from this repo, with the 5 env vars
    above. The stack joins the `npm_proxy` docker network so NPM can reach
    the container as `timesheet:80`.
-4. In Nginx Proxy Manager, add a proxy host for `timesheet.redpill.online`
-   forwarding to `timesheet:80`, with a Let's Encrypt cert.
-5. `curl -I https://timesheet.redpill.online/` → 200 HTML.
+4. In Nginx Proxy Manager, add a proxy host for your hostname forwarding to `timesheet:80`, with a Let's Encrypt cert.
+5. `curl -I https://<your-deploy-host>/` → 200 HTML.
 
 Pushing to `main` + redeploying the Portainer stack ships a new version.
 
@@ -181,13 +180,13 @@ Pushing to `main` + redeploying the Portainer stack ships a new version.
 
 All `/api/*` requests (except `/api/health`) require the
 `X-Agent-Key: $AGENT_API_KEY` header. Base URL is your deploy origin
-(e.g. `https://timesheet.redpill.online`).
+(e.g. `https://timesheet.example.com`).
 
 ### `GET /api/employees`
 
 ```bash
 curl -H "X-Agent-Key: $AGENT_KEY" \
-  https://timesheet.redpill.online/api/employees
+  https://timesheet.example.com/api/employees
 ```
 
 Returns an array of `{ tabName, displayName, active, color, sortOrder }`,
@@ -196,7 +195,7 @@ sorted ascending by `sortOrder`.
 ### `GET /api/hours/:tabName?weekStart=YYYY-MM-DD`
 
 ```bash
-curl "https://timesheet.redpill.online/api/hours/jane-smith?weekStart=2026-04-19" \
+curl "https://timesheet.example.com/api/hours/jane-smith?weekStart=2026-04-19" \
   -H "X-Agent-Key: $AGENT_KEY"
 ```
 
@@ -206,7 +205,7 @@ Returns the array of slots for the 7 days starting on `weekStart` (Sunday).
 ### `POST /api/hours/:tabName`
 
 ```bash
-curl -X POST https://timesheet.redpill.online/api/hours/jane-smith \
+curl -X POST https://timesheet.example.com/api/hours/jane-smith \
   -H "X-Agent-Key: $AGENT_KEY" \
   -H "Content-Type: application/json" \
   -d '[
@@ -225,7 +224,7 @@ to create duplicate rows.
 
 ```bash
 curl -H "X-Agent-Key: $AGENT_KEY" \
-  https://timesheet.redpill.online/api/weeks/jane-smith
+  https://timesheet.example.com/api/weeks/jane-smith
 ```
 
 Returns the list of Sunday-start dates (descending) that have at least one
@@ -238,7 +237,7 @@ Unprotected. Returns `{ status: "ok", service, version, sheetId (6-char prefix),
 
 ### Agent prompt block (drop into your agent's system prompt)
 
-> You have access to an hours tracking API at `https://timesheet.redpill.online`.
+> You have access to an hours tracking API at `https://timesheet.example.com`.
 > Include the header `X-Agent-Key: <provided separately>` on every request
 > except `/api/health`.
 >

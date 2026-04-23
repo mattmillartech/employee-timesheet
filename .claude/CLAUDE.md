@@ -5,14 +5,12 @@
 Self-hosted employee hours tracking web app.
 
 - **Stack:** React 18 + TypeScript (strict) + Vite + Tailwind v4; tiny Express sidecar; deployed via Docker + Nginx.
-- **Backend data store:** Google Sheet (one tab per employee + a `_Config` tab + a `Dashboard` tab with live aggregation formulas).
-- **Human auth:** Google Identity Services token flow (in-memory only), gated by `VITE_ALLOWED_GOOGLE_EMAIL`.
+- **Backend data store:** Google Sheet (one tab per employee + a `_Config` tab + a `Dashboard` tab with a live pivot table).
+- **Human auth:** Google Identity Services token flow, gated by `VITE_ALLOWED_GOOGLE_EMAIL`.
 - **Agent / API auth:** Service Account token minted by the Express sidecar, protected by `X-Agent-Key`.
-- **Prod:** [timesheet.redpill.online](https://timesheet.redpill.online) on Redpill VPS (Contabo), managed via Portainer (endpoint id 3) behind Nginx Proxy Manager on the `npm_proxy` network.
+- **Prod:** a single Docker container behind a reverse proxy on any VPS. Deploy template is Portainer + Nginx Proxy Manager, but any Docker host + TLS terminator will do.
 
 Authoritative spec: [employee-timesheet-creation-prompt.md](../employee-timesheet-creation-prompt.md).
-
-Current build plan: `C:/Users/mattm/.claude/plans/project-overview-build-declarative-penguin.md`.
 
 ---
 
@@ -32,41 +30,15 @@ npm run typecheck && npm run lint
 
 ---
 
-## Memory Protocol (Vault + Nexus + Rigour — all active)
+## Agent Infrastructure (private — not in this repo)
 
-### Vault (structured, git-backed)
+This maintainer runs a shared vault + episodic memory service for cross-session agent context. Neither service is part of this project and neither should be referenced from a public repo.
 
-Path on this machine: `C:\Users\mattm\.vault\`. Remote: `root@192.168.1.56:/mnt/user/git/vault.git`.
+- **Vault:** private Obsidian vault synced via a self-hosted git remote. Agents read/write `brain/`, `agents/claude/daily/`, `work/active/`, etc. — see the vault's own `CLAUDE.md` for structure.
+- **Nexus:** private episodic memory bus. MCP tools `nexus_write`, `nexus_search`, `nexus_status` are pre-configured in the harness when the maintainer is active.
+- **Rigour:** `@rigour-labs/cli` DLP hook blocks secret commits at Write / Edit / MultiEdit time. MCP server is configured in `settings.json`.
 
-- Architecture decisions → `brain/decisions/<slug>.md`
-- Reusable patterns → `brain/patterns/<slug>.md`
-- Gotchas / foot-guns → `brain/gotchas/<slug>.md`
-- Active project context → `work/active/timesheet.md` (this project's state)
-- Session logs → `agents/claude/daily/YYYY-MM-DD.md`
-
-Every durable write → immediate commit + push:
-
-```bash
-cd C:/Users/mattm/.vault && git pull --rebase && git add -A && git commit -m "type: description" && git push
-```
-
-See `C:/Users/mattm/.vault/CLAUDE.md` and `C:/Users/mattm/.vault/AGENTS.md` for full conventions.
-
-### Nexus (episodic, cross-agent, cross-session)
-
-BubbleFish Nexus at `http://192.168.1.56:8093`. This machine's source: **`claude-code-millitebook`**.
-
-- `nexus_write` — store a session summary, discovery, or decision (MCP tool)
-- `nexus_search` — query all agents' memories (MCP tool)
-- `nexus_status` — check daemon health (MCP tool)
-
-Use Nexus for: session summaries on phase completion, cross-agent coordination notes, discoveries worth finding from a future session.
-
-> **Mnemo Cortex (port 50001) is DEPRECATED — do not use.** Historical data migrated to Nexus.
-
-### Rigour (DLP on writes)
-
-The `@rigour-labs/cli` hook runs on every Write / Edit / MultiEdit and blocks commits that contain secrets (API keys, tokens, private keys). If a write is blocked, fix the content — don't bypass. Rigour MCP server is also configured.
+Forkers can ignore all three — nothing here depends on them.
 
 ---
 
@@ -76,19 +48,19 @@ The `@rigour-labs/cli` hook runs on every Write / Edit / MultiEdit and blocks co
 - Run `npm run typecheck && npm run lint` before considering any change complete.
 - TypeScript strict mode, zero `any`. All Sheets API calls wrapped in try/catch with user-facing error messages.
 - Weeks start on Sunday (`weekStartsOn: 0`). Times stored internally as 24h; 12h is a display toggle only.
-- Only `hoursTrackerSheetId` is allowed in `localStorage` (per spec). No auth-sensitive data in localStorage or sessionStorage.
+- `localStorage` is used for the sheet ID AND the auth session (token + expiry + email) so reloads don't force a fresh sign-in.
 - Dedup-write invariant: a slot row keyed by `(date, slotType, start)` on an employee tab must be unique — update in place, don't append a duplicate.
 
 ---
 
 ## Deploy
 
-Production deploys happen via the `timesheet` Portainer stack on Redpill (endpoint id 3). The stack is git-based — Portainer pulls this repo from GitHub and builds on Redpill. Secrets live in Portainer stack env, not on disk. Full deploy procedure: see the build plan's M7 section.
+Production deploys are defined as a git-based Portainer stack that pulls this repo's `docker-compose.yml` and builds on the host. Stack env vars (`VITE_*` baked in at build, `GOOGLE_SERVICE_ACCOUNT_JSON` + `AGENT_API_KEY` at runtime) stay in Portainer, never on disk or in git. See [`docs/DEPLOY.md`](../docs/DEPLOY.md) for the full runbook — all example URLs there are placeholders.
 
-Credential: Bitwarden item "Portainer - Redpill" (look up the UUID via `bw list items --search "portainer"` — UUIDs belong in the private vault, not a public repo).
+Portainer credentials live in the maintainer's Bitwarden vault. Forkers should substitute their own.
 
 ---
 
-## Agent Infrastructure Kept From Runnit (cross-project, safe to use)
+## `.claude/` Contents
 
-`.claude/skills/` includes: agent-customization, merge-conflict-resolver, obsidian-mind, orchestration-manager, powershell-operations, review, review-artifact-policy, review-evidence-operations, review-taxonomy, self-improvement, the-dev-squad, validation-and-test-operations, workspace-hygiene. Runnit-specific Firebase / Stripe / rollout / QA skills were removed.
+`.claude/skills/` — generic agent skills kept from an earlier Runnit project: `agent-customization`, `merge-conflict-resolver`, `orchestration-manager`, `powershell-operations`, `review`, `review-artifact-policy`, `review-evidence-operations`, `review-taxonomy`, `self-improvement`, `validation-and-test-operations`, `workspace-hygiene`. Homelab-specific skills (`obsidian-mind`, `the-dev-squad`) and the session-end command were removed — they referenced private infrastructure.

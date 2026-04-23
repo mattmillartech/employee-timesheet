@@ -36,7 +36,7 @@ The project description and use cases need to be respected, but anything to do w
 3. Create OAuth 2.0 credentials:
    - Type: Web application
    - Authorized JavaScript origins: add your deployment domain
-     (e.g., https://hours.redpill.online) AND http://localhost:5173 for dev
+     (e.g., https://timesheet.example.com) AND http://localhost:5173 for dev
    - No redirect URIs needed (implicit/token flow)
 4. Create a Service Account:
    - Name: e.g., "ai-agent-access"
@@ -360,15 +360,15 @@ Dependencies: express, google-auth-library, googleapis
 7. AI Agent API reference with curl examples:
 
    List employees:
-     curl https://hours.redpill.online/api/employees \
+     curl https://timesheet.example.com/api/employees \
        -H "X-Agent-Key: your-key"
 
    Get a week of hours:
-     curl "https://hours.redpill.online/api/hours/jane-smith?weekStart=2026-04-13" \
+     curl "https://timesheet.example.com/api/hours/jane-smith?weekStart=2026-04-13" \
        -H "X-Agent-Key: your-key"
 
    Enter hours (POST):
-     curl -X POST https://hours.redpill.online/api/hours/jane-smith \
+     curl -X POST https://timesheet.example.com/api/hours/jane-smith \
        -H "X-Agent-Key: your-key" \
        -H "Content-Type: application/json" \
        -d '[
@@ -377,7 +377,7 @@ Dependencies: express, google-auth-library, googleapis
        ]'
 
    AI agent instructions (include this as a copyable block in the README):
-     You have access to an hours tracking API. Base URL: https://hours.redpill.online
+     You have access to an hours tracking API. Base URL: https://timesheet.example.com
      API key: (provided separately as X-Agent-Key header).
      When given an image of a paper timesheet, parse each employee name and their
      daily start/end times, then POST to /api/hours/:tabName for each employee.

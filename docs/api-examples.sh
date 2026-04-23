@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Smoke-test the timesheet sidecar API.
 #
-#   export BASE=https://timesheet.redpill.online
+#   export BASE=https://timesheet.example.com
 #   export AGENT_KEY=your-x-agent-key
 #   bash docs/api-examples.sh
 #
@@ -10,7 +10,7 @@
 
 set -euo pipefail
 
-: "${BASE:?BASE env var is required, e.g. https://timesheet.redpill.online}"
+: "${BASE:?BASE env var is required, e.g. https://timesheet.example.com}"
 : "${AGENT_KEY:?AGENT_KEY env var is required}"
 
 echo "→ health (unauthenticated)"
