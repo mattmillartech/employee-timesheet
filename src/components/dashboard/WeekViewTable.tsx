@@ -1,4 +1,5 @@
 import clsx from 'clsx';
+import { Coffee } from 'lucide-react';
 import { format, parseISODate } from '@/lib/dateUtils';
 import { formatForDisplay, formatHoursShort } from '@/lib/timeUtils';
 import type { WeekView } from '@/lib/dashboardAggregator';
@@ -70,8 +71,17 @@ export function WeekViewTable({ view, displayMode, onCellClick }: WeekViewTableP
                             : '—'}
                           {cell.latestEnd ? ` → ${formatForDisplay(cell.latestEnd, displayMode)}` : ''}
                         </div>
-                        <div className="font-mono font-medium">
-                          {formatHoursShort(cell.totalHours)}h
+                        <div className="font-mono font-medium inline-flex items-center gap-1 justify-center">
+                          <span>{formatHoursShort(cell.totalHours)}h</span>
+                          {cell.hasBreak ? (
+                            <span
+                              className="inline-flex items-center gap-0.5 text-muted text-[10px] font-normal"
+                              title={`${formatHoursShort(cell.breakHours)}h break deducted`}
+                            >
+                              <Coffee className="w-3 h-3" aria-hidden />
+                              −{formatHoursShort(cell.breakHours)}
+                            </span>
+                          ) : null}
                         </div>
                       </div>
                     ) : (

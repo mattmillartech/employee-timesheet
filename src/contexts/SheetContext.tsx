@@ -24,6 +24,7 @@ import {
   getEmployees,
   writeAppSetting,
 } from '@/lib/sheetsApi';
+import { listAppTimesheets } from '@/lib/driveApi';
 import type { AppSettings, DisplayMode, Employee } from '@/types';
 
 type Status = 'idle' | 'loading' | 'provisioning' | 'ready' | 'error';
@@ -156,9 +157,13 @@ export function SheetProvider({ children }: { children: ReactNode }): JSX.Elemen
     return newId;
   }, [provisionNewSheet]);
 
-  // On sign-in, (re)resolve the sheet id for the current user. If nothing
-  // is on file, auto-provision a fresh sheet in their Drive and store the id
-  // under the per-email key so future sign-ins don't re-create.
+  // On sign-in, (re)resolve the sheet id for the current user. Discovery
+  // order:
+  //   1. Per-email localStorage (preserves prior choice on this device)
+  //   2. Legacy global localStorage + VITE_SHEET_ID env (backward compat)
+  //   3. Drive API `drive.file`-scoped search for app-created sheets
+  //      (cross-device — same OAuth client sees the same created-file set)
+  //   4. Auto-provision a fresh sheet in the user's Drive
   useEffect(() => {
     if (authStatus !== 'signed-in') {
       setStatus('idle');
@@ -171,21 +176,34 @@ export function SheetProvider({ children }: { children: ReactNode }): JSX.Elemen
       void loadAll();
       return;
     }
-    // No sheet for this user yet — create one.
     if (!email) return;
+    // Try Drive search first — if the user created a sheet via this app on
+    // another device, it shows up here and we reuse it.
     void (async () => {
+      setStatus('provisioning');
+      setError(null);
       try {
+        const discovered = await run((t) => listAppTimesheets(t));
+        if (discovered.length > 0) {
+          // Use the oldest app-created sheet as canonical. Race-safe:
+          // two devices signing in concurrently create duplicates; next
+          // sign-in picks the oldest (first-written-wins).
+          const chosen = discovered[0];
+          if (!chosen) throw new Error('Drive search returned an empty entry');
+          persistSheetIdForUser(email, chosen.id);
+          setSheetIdState(chosen.id);
+          return;
+        }
         await provisionNewSheet();
       } catch (err) {
         setStatus('error');
         setError(
           err instanceof Error
-            ? `Couldn't create a new sheet: ${err.message}`
+            ? `Couldn't find or create a sheet: ${err.message}`
             : String(err),
         );
       }
     })();
-    // loadAll fires in the follow-up effect when sheetId state changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authStatus, email]);
 

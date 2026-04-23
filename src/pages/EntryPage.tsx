@@ -487,7 +487,7 @@ export function EntryPage(): JSX.Element {
   }
 
   return (
-    <section className="p-6 space-y-5">
+    <section className="p-6 max-w-6xl mx-auto space-y-5">
       <header className="flex flex-wrap items-center gap-3">
         <EmployeeDropdown
           employees={activeEmployees}

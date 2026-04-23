@@ -23,7 +23,12 @@ export type EmployeeDailyDetail = {
   date: string;
   earliestStart: string | null;
   latestEnd: string | null;
+  /** Net hours for the day (work minus break). Break slots are stored as negative hours. */
   totalHours: number;
+  /** Positive decimal: sum of |hours| on break slots for this day. 0 if none. */
+  breakHours: number;
+  /** True when at least one break slot exists for this day. */
+  hasBreak: boolean;
 };
 
 /** Week view model: one row per employee, 7 day cells with start/end/total. */
@@ -137,6 +142,15 @@ function totalHoursByDay(slots: readonly Slot[]): Map<string, number> {
   return map;
 }
 
+function breakHoursByDay(slots: readonly Slot[]): Map<string, number> {
+  const map = new Map<string, number>();
+  for (const s of slots) {
+    if (s.slotType !== 'break') continue;
+    map.set(s.date, (map.get(s.date) ?? 0) + Math.abs(s.hours));
+  }
+  return map;
+}
+
 function aggregateWeek(input: AggregatorInput): WeekView {
   const sunday = startOfWeek(input.anchor, { weekStartsOn: 0 });
   const saturday = saturdayOf(sunday);
@@ -150,12 +164,18 @@ function aggregateWeek(input: AggregatorInput): WeekView {
     const starts = earliestStartByDay(slots);
     const ends = latestEndByDay(slots);
     const totals = totalHoursByDay(slots);
-    const cells: EmployeeDailyDetail[] = daysISO.map((date) => ({
-      date,
-      earliestStart: starts.get(date) ?? null,
-      latestEnd: ends.get(date) ?? null,
-      totalHours: totals.get(date) ?? 0,
-    }));
+    const breaks = breakHoursByDay(slots);
+    const cells: EmployeeDailyDetail[] = daysISO.map((date) => {
+      const breakH = breaks.get(date) ?? 0;
+      return {
+        date,
+        earliestStart: starts.get(date) ?? null,
+        latestEnd: ends.get(date) ?? null,
+        totalHours: totals.get(date) ?? 0,
+        breakHours: breakH,
+        hasBreak: breakH > 0,
+      };
+    });
     const rowTotal = cells.reduce((sum, c) => sum + c.totalHours, 0);
     return { employee, cells, rowTotal };
   });

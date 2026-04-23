@@ -19,7 +19,13 @@ export const USERINFO_ENDPOINT = 'https://www.googleapis.com/oauth2/v3/userinfo'
 
 export const SHEETS_SCOPE = 'https://www.googleapis.com/auth/spreadsheets';
 export const USERINFO_SCOPE = 'https://www.googleapis.com/auth/userinfo.email';
-export const SCOPES = [SHEETS_SCOPE, USERINFO_SCOPE].join(' ');
+/**
+ * drive.file = per-file access to files the app itself created (or that the
+ * user explicitly opened via the Picker). This is what lets us find the same
+ * user's sheet across devices without a broader "read all your Drive" prompt.
+ */
+export const DRIVE_FILE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
+export const SCOPES = [SHEETS_SCOPE, USERINFO_SCOPE, DRIVE_FILE_SCOPE].join(' ');
 
 /** Columns on every employee tab, in order. Row 1 is the header row. */
 export const EMPLOYEE_COLUMNS = ['date', 'day', 'slotType', 'start', 'end', 'hours', 'notes'] as const;

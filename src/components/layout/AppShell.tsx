@@ -8,7 +8,7 @@ export function AppShell({ children }: { children: ReactNode }): JSX.Element {
         Skip to content
       </a>
       <Header />
-      <main id="main" className="flex-1 max-w-6xl w-full mx-auto">
+      <main id="main" className="flex-1 w-full">
         {children}
       </main>
     </div>
