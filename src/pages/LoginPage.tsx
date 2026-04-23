@@ -3,7 +3,7 @@ import { ENV } from '@/lib/constants';
 
 export function LoginPage(): JSX.Element {
   const { status, error, signIn } = useAuth();
-  const configMissing = !ENV.googleClientId || !ENV.allowedGoogleEmail;
+  const configMissing = !ENV.googleClientId;
 
   return (
     <main className="min-h-screen flex items-center justify-center bg-bg text-fg font-sans">
@@ -19,17 +19,7 @@ export function LoginPage(): JSX.Element {
           <div className="p-4 rounded-md border border-danger/40 bg-danger/10 text-sm">
             <p className="font-medium text-danger">Configuration missing</p>
             <p className="mt-1 text-fg/80">
-              {!ENV.googleClientId && (
-                <>
-                  <code>VITE_GOOGLE_CLIENT_ID</code> is not set.
-                  <br />
-                </>
-              )}
-              {!ENV.allowedGoogleEmail && (
-                <>
-                  <code>VITE_ALLOWED_GOOGLE_EMAIL</code> is not set.
-                </>
-              )}
+              <code>VITE_GOOGLE_CLIENT_ID</code> is not set on this build.
             </p>
           </div>
         ) : null}
@@ -47,8 +37,8 @@ export function LoginPage(): JSX.Element {
           <div className="p-4 rounded-md border border-danger/40 bg-danger/10 text-sm">
             <p className="font-medium text-danger">Unauthorized</p>
             <p className="mt-1 text-fg/80">
-              This account isn't on the allowlist. Sign in with{' '}
-              <code>{ENV.allowedGoogleEmail}</code>.
+              This account isn't on the allowlist. Allowed:{' '}
+              <code>{ENV.allowedGoogleEmails.join(', ')}</code>.
             </p>
           </div>
         ) : null}

@@ -29,15 +29,36 @@ export const EMPLOYEE_RANGE = 'A:G';
 export const CONFIG_COLUMNS = ['tabName', 'displayName', 'active', 'color', 'sortOrder'] as const;
 export const CONFIG_RANGE = 'A:E';
 
+/** Legacy single-sheet key. Retained so pre-multi-user deployments keep working. */
 export const LOCALSTORAGE_SHEET_ID_KEY = 'hoursTrackerSheetId';
+/** Per-user key prefix: localStorage["hoursTrackerSheetId:<email>"] = sheetId. */
+export const LOCALSTORAGE_SHEET_ID_PREFIX = 'hoursTrackerSheetId:';
 export const LOCALSTORAGE_AUTH_SESSION_KEY = 'timesheetAuthSession';
+export const DEFAULT_NEW_SHEET_TITLE = 'Employee Timesheet';
 
 export const TOKEN_EXPIRY_BUFFER_MS = 60_000;
 
 export const DAY_ABBREVIATIONS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'] as const;
 
+function parseAllowedEmails(raw: string): readonly string[] {
+  return raw
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter((s) => s.length > 0);
+}
+
 export const ENV = {
   googleClientId: import.meta.env['VITE_GOOGLE_CLIENT_ID'] ?? '',
-  allowedGoogleEmail: (import.meta.env['VITE_ALLOWED_GOOGLE_EMAIL'] ?? '').toLowerCase(),
+  /**
+   * Comma-separated list of email addresses allowed to sign in.
+   * - Empty / unset: any Google account that passes GCP OAuth (gated by
+   *   the consent screen's test-user list while unpublished) can sign in
+   *   and gets its OWN auto-provisioned sheet.
+   * - Non-empty: strict allowlist — sign-in is rejected for any email
+   *   that isn't on the list.
+   */
+  allowedGoogleEmails: parseAllowedEmails(
+    import.meta.env['VITE_ALLOWED_GOOGLE_EMAIL'] ?? '',
+  ),
   sheetIdFromEnv: import.meta.env['VITE_SHEET_ID'] ?? '',
 } as const;

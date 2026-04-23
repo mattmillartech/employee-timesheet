@@ -1,5 +1,6 @@
 import {
   ALL_SLOTS_TAB_NAME,
+  CONFIG_COLUMNS,
   CONFIG_RANGE,
   CONFIG_TAB_NAME,
   DASHBOARD_TAB_NAME,
@@ -84,6 +85,53 @@ export async function fetchUserInfo(token: string): Promise<GoogleUserInfo> {
     throw new SheetsApiError(response.status, 'Failed to fetch user info');
   }
   return (await response.json()) as GoogleUserInfo;
+}
+
+/**
+ * Create a fresh spreadsheet in the signed-in user's Drive, pre-populated with
+ * a `_Config` tab + header row. Returns the new spreadsheet's ID.
+ *
+ * Uses `auth/spreadsheets` scope (already requested) — no new consent needed.
+ * The created sheet is owned by the user whose token is passed in.
+ */
+export async function createTimesheetSpreadsheet(
+  title: string,
+  token: string,
+): Promise<string> {
+  const body = {
+    properties: { title },
+    sheets: [
+      {
+        properties: {
+          title: CONFIG_TAB_NAME,
+          gridProperties: { rowCount: 200, columnCount: CONFIG_COLUMNS.length },
+        },
+        data: [
+          {
+            startRow: 0,
+            startColumn: 0,
+            rowData: [
+              {
+                values: CONFIG_COLUMNS.map((col) => ({
+                  userEnteredValue: { stringValue: col },
+                  userEnteredFormat: { textFormat: { bold: true } },
+                })),
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  };
+  const res = await sheetsFetch<{ spreadsheetId: string }>(
+    `${SHEETS_API_BASE}`,
+    token,
+    {
+      method: 'POST',
+      body: JSON.stringify(body),
+    },
+  );
+  return res.spreadsheetId;
 }
 
 export async function readTab(

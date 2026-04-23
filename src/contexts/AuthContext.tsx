@@ -184,16 +184,11 @@ export function AuthProvider({ children }: { children: ReactNode }): JSX.Element
       // Verify email allowlist via userinfo.
       const userinfo = await fetchUserInfo(token);
       const email = (userinfo.email ?? '').toLowerCase();
-      if (!ENV.allowedGoogleEmail) {
-        setState({
-          status: 'error',
-          email,
-          expiresAt,
-          error: 'VITE_ALLOWED_GOOGLE_EMAIL is not set in the build',
-        });
-        return;
-      }
-      if (email !== ENV.allowedGoogleEmail) {
+      // Empty allowlist = any Google account that passed GCP OAuth can sign
+      // in; non-empty = strict allowlist match required.
+      const hasAllowlist = ENV.allowedGoogleEmails.length > 0;
+      const allowed = !hasAllowlist || ENV.allowedGoogleEmails.includes(email);
+      if (!allowed) {
         if (window.google && tokenRef.current) {
           window.google.accounts.oauth2.revoke(tokenRef.current, () => undefined);
         }

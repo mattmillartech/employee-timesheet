@@ -11,19 +11,22 @@ import { useAuth } from './AuthContext';
 import { useSheetRunner } from '@/hooks/useSheetData';
 import {
   DEFAULT_DISPLAY_MODE,
+  DEFAULT_NEW_SHEET_TITLE,
   DEFAULT_TIMEZONE,
   ENV,
   LOCALSTORAGE_SHEET_ID_KEY,
+  LOCALSTORAGE_SHEET_ID_PREFIX,
   SETTING_KEYS,
 } from '@/lib/constants';
 import {
+  createTimesheetSpreadsheet,
   ensureSettingsTab,
   getEmployees,
   writeAppSetting,
 } from '@/lib/sheetsApi';
 import type { AppSettings, DisplayMode, Employee } from '@/types';
 
-type Status = 'idle' | 'loading' | 'ready' | 'error';
+type Status = 'idle' | 'loading' | 'provisioning' | 'ready' | 'error';
 
 type SheetContextValue = {
   sheetId: string;
@@ -36,25 +39,58 @@ type SheetContextValue = {
   settings: AppSettings;
   setTimezone: (tz: string) => Promise<void>;
   setDisplayMode: (mode: DisplayMode) => Promise<void>;
+  /** Create a brand-new sheet for the signed-in user (replaces the current one for this user). */
+  createNewSheetForUser: () => Promise<string>;
 };
 
 const SheetContext = createContext<SheetContextValue | null>(null);
 
-function loadInitialSheetId(): string {
+function lsGet(key: string): string | null {
   try {
-    const fromLs = localStorage.getItem(LOCALSTORAGE_SHEET_ID_KEY);
-    if (fromLs && fromLs.length > 0) return fromLs;
+    return localStorage.getItem(key);
   } catch {
-    // localStorage access can fail in private-browsing modes; ignore.
+    return null;
   }
+}
+function lsSet(key: string, value: string): void {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // ignore — private browsing etc.
+  }
+}
+
+/**
+ * Resolve the sheet ID to use for a given signed-in email.
+ * Priority:
+ *   1. Per-email localStorage — `hoursTrackerSheetId:<email>`
+ *   2. Legacy global localStorage — `hoursTrackerSheetId` (preserves
+ *      pre-multi-user deployments where one sheet was shared)
+ *   3. Build-time `VITE_SHEET_ID` env var (same migration safety net)
+ *   4. null → caller provisions a fresh sheet
+ */
+function resolveSheetId(email: string | null): string {
+  if (email) {
+    const perUser = lsGet(`${LOCALSTORAGE_SHEET_ID_PREFIX}${email.toLowerCase()}`);
+    if (perUser) return perUser;
+  }
+  const legacy = lsGet(LOCALSTORAGE_SHEET_ID_KEY);
+  if (legacy) return legacy;
   return ENV.sheetIdFromEnv;
 }
 
+function persistSheetIdForUser(email: string, sheetId: string): void {
+  lsSet(`${LOCALSTORAGE_SHEET_ID_PREFIX}${email.toLowerCase()}`, sheetId);
+  // Also keep the legacy global key in sync for backwards-compatibility with
+  // anything that still reads it directly.
+  lsSet(LOCALSTORAGE_SHEET_ID_KEY, sheetId);
+}
+
 export function SheetProvider({ children }: { children: ReactNode }): JSX.Element {
-  const { status: authStatus } = useAuth();
+  const { status: authStatus, email } = useAuth();
   const run = useSheetRunner();
 
-  const [sheetId, setSheetIdState] = useState<string>(loadInitialSheetId);
+  const [sheetId, setSheetIdState] = useState<string>(() => resolveSheetId(null));
   const [status, setStatus] = useState<Status>('idle');
   const [error, setError] = useState<string | null>(null);
   const [employees, setEmployees] = useState<Employee[]>([]);
@@ -63,14 +99,17 @@ export function SheetProvider({ children }: { children: ReactNode }): JSX.Elemen
     displayMode: DEFAULT_DISPLAY_MODE,
   });
 
-  const setSheetId = useCallback((id: string) => {
-    setSheetIdState(id);
-    try {
-      localStorage.setItem(LOCALSTORAGE_SHEET_ID_KEY, id);
-    } catch {
-      // ignore
-    }
-  }, []);
+  const setSheetId = useCallback(
+    (id: string) => {
+      setSheetIdState(id);
+      if (email) {
+        persistSheetIdForUser(email, id);
+      } else {
+        lsSet(LOCALSTORAGE_SHEET_ID_KEY, id);
+      }
+    },
+    [email],
+  );
 
   const refreshEmployees = useCallback(async (): Promise<void> => {
     if (!sheetId) return;
@@ -81,7 +120,7 @@ export function SheetProvider({ children }: { children: ReactNode }): JSX.Elemen
   const loadAll = useCallback(async (): Promise<void> => {
     if (!sheetId) {
       setStatus('error');
-      setError('No Google Sheet ID configured. Set it in Settings or VITE_SHEET_ID.');
+      setError('No sheet ID configured.');
       return;
     }
     setStatus('loading');
@@ -98,14 +137,65 @@ export function SheetProvider({ children }: { children: ReactNode }): JSX.Elemen
     }
   }, [run, sheetId]);
 
+  const provisionNewSheet = useCallback(async (): Promise<string> => {
+    if (!email) throw new Error('No signed-in user — cannot provision a sheet.');
+    setStatus('provisioning');
+    setError(null);
+    const title = `${DEFAULT_NEW_SHEET_TITLE} — ${email}`;
+    const newId = await run((t) => createTimesheetSpreadsheet(title, t));
+    persistSheetIdForUser(email, newId);
+    setSheetIdState(newId);
+    return newId;
+  }, [email, run]);
+
+  const createNewSheetForUser = useCallback(async (): Promise<string> => {
+    const newId = await provisionNewSheet();
+    // Immediately trigger loadAll for the new sheet.
+    // (loadAll depends on sheetId state — the setSheetIdState above will
+    // trigger a re-render whose effect runs loadAll; we return early.)
+    return newId;
+  }, [provisionNewSheet]);
+
+  // On sign-in, (re)resolve the sheet id for the current user. If nothing
+  // is on file, auto-provision a fresh sheet in their Drive and store the id
+  // under the per-email key so future sign-ins don't re-create.
   useEffect(() => {
-    if (authStatus === 'signed-in') {
-      void loadAll();
-    } else {
+    if (authStatus !== 'signed-in') {
       setStatus('idle');
       setEmployees([]);
+      return;
     }
-  }, [authStatus, loadAll]);
+    const resolved = resolveSheetId(email);
+    if (resolved) {
+      setSheetIdState(resolved);
+      void loadAll();
+      return;
+    }
+    // No sheet for this user yet — create one.
+    if (!email) return;
+    void (async () => {
+      try {
+        await provisionNewSheet();
+      } catch (err) {
+        setStatus('error');
+        setError(
+          err instanceof Error
+            ? `Couldn't create a new sheet: ${err.message}`
+            : String(err),
+        );
+      }
+    })();
+    // loadAll fires in the follow-up effect when sheetId state changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authStatus, email]);
+
+  // Re-run loadAll whenever sheetId changes while signed in.
+  useEffect(() => {
+    if (authStatus !== 'signed-in') return;
+    if (!sheetId) return;
+    void loadAll();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sheetId, authStatus]);
 
   const setTimezone = useCallback(
     async (tz: string): Promise<void> => {
@@ -137,6 +227,7 @@ export function SheetProvider({ children }: { children: ReactNode }): JSX.Elemen
       settings,
       setTimezone,
       setDisplayMode,
+      createNewSheetForUser,
     }),
     [
       sheetId,
@@ -149,6 +240,7 @@ export function SheetProvider({ children }: { children: ReactNode }): JSX.Elemen
       settings,
       setTimezone,
       setDisplayMode,
+      createNewSheetForUser,
     ],
   );
 

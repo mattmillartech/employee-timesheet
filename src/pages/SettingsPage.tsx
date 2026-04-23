@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { toast } from 'sonner';
-import { FileSpreadsheet } from 'lucide-react';
+import { FileSpreadsheet, ExternalLink, Plus } from 'lucide-react';
+import { useAuth } from '@/contexts/AuthContext';
 import { useSheet } from '@/contexts/SheetContext';
 import { useSheetRunner } from '@/hooks/useSheetData';
 import { AddEmployeeModal } from '@/components/ui/AddEmployeeModal';
@@ -11,7 +12,6 @@ import {
   updateConfigOrder,
   updateEmployee,
 } from '@/lib/sheetsApi';
-import { LOCALSTORAGE_SHEET_ID_KEY } from '@/lib/constants';
 import type { Employee } from '@/types';
 
 const COMMON_TIMEZONES = [
@@ -37,13 +37,16 @@ export function SettingsPage(): JSX.Element {
     setDisplayMode,
     employees,
     refreshEmployees,
+    createNewSheetForUser,
   } = useSheet();
+  const { email } = useAuth();
   const run = useSheetRunner();
 
   const [sheetIdDraft, setSheetIdDraft] = useState(sheetId);
   const [savingTz, setSavingTz] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const [dashboardBusy, setDashboardBusy] = useState(false);
+  const [creatingSheet, setCreatingSheet] = useState(false);
 
   const syncDashboardTab = async (activeList: readonly Employee[]): Promise<void> => {
     try {
@@ -127,6 +130,24 @@ export function SettingsPage(): JSX.Element {
     }
   };
 
+  const handleCreateNewSheet = async (): Promise<void> => {
+    if (
+      !window.confirm(
+        `This will create a brand-new Google Sheet in ${email}'s Drive and switch the app to use it. Your current sheet stays untouched — you can always paste its ID back below to return to it. Continue?`,
+      )
+    ) return;
+    setCreatingSheet(true);
+    try {
+      const newId = await createNewSheetForUser();
+      setSheetIdDraft(newId);
+      toast.success('New sheet created and now active.');
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      setCreatingSheet(false);
+    }
+  };
+
   return (
     <section className="p-6 max-w-3xl space-y-8">
       <header>
@@ -147,11 +168,37 @@ export function SettingsPage(): JSX.Element {
       </div>
 
       {/* Google Sheet wiring */}
-      <div className="rounded-xl border border-border bg-surface p-5 space-y-3">
-        <h3 className="font-medium">Google Sheet</h3>
+      <div className="rounded-xl border border-border bg-surface p-5 space-y-4">
+        <div>
+          <h3 className="font-medium">Google Sheet</h3>
+          <p className="text-xs text-muted">
+            Each signed-in account has its own sheet. Switch sheets by pasting a different ID or create a fresh one.
+          </p>
+        </div>
+
+        {sheetId ? (
+          <div className="text-sm bg-surface-2 rounded-md border border-border p-3 flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <p className="text-muted text-xs">Active sheet</p>
+              <p className="font-mono truncate">{sheetId}</p>
+            </div>
+            <a
+              href={`https://docs.google.com/spreadsheets/d/${sheetId}/edit`}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1 text-primary hover:underline text-sm shrink-0"
+            >
+              <ExternalLink className="w-4 h-4" aria-hidden />
+              Open
+            </a>
+          </div>
+        ) : (
+          <p className="text-sm text-muted">No sheet configured yet.</p>
+        )}
+
         <div className="space-y-2">
           <label className="text-sm font-medium" htmlFor="sheet-id">
-            Sheet ID
+            Switch to a different sheet (paste ID)
           </label>
           <div className="flex gap-2">
             <input
@@ -164,26 +211,39 @@ export function SettingsPage(): JSX.Element {
             />
             <button
               type="button"
-              onClick={() => setSheetId(sheetIdDraft)}
-              className="rounded-md bg-primary text-primary-fg px-4 py-2 text-sm font-medium"
+              onClick={() => setSheetId(sheetIdDraft.trim())}
+              disabled={!sheetIdDraft.trim() || sheetIdDraft.trim() === sheetId}
+              className="rounded-md bg-primary text-primary-fg px-4 py-2 text-sm font-medium disabled:opacity-50"
             >
-              Save
+              Use this sheet
             </button>
           </div>
           <p className="text-xs text-muted">
-            Stored in <code>localStorage["{LOCALSTORAGE_SHEET_ID_KEY}"]</code> — the only
-            localStorage key this app uses.
+            The sheet must already be accessible by {email ?? 'the signed-in account'}.
+            Stored per-account in localStorage.
           </p>
         </div>
-        <button
-          type="button"
-          onClick={() => void handleInitDashboard()}
-          disabled={dashboardBusy}
-          className="inline-flex items-center gap-1.5 rounded-md border border-border bg-surface-2 px-3 py-1.5 text-sm hover:bg-border disabled:opacity-60"
-        >
-          <FileSpreadsheet className="w-4 h-4" aria-hidden />
-          <span>{dashboardBusy ? 'Building…' : 'Initialize / rebuild Dashboard tab'}</span>
-        </button>
+
+        <div className="flex flex-wrap gap-2 pt-1">
+          <button
+            type="button"
+            onClick={() => void handleCreateNewSheet()}
+            disabled={creatingSheet}
+            className="inline-flex items-center gap-1.5 rounded-md border border-border bg-surface-2 px-3 py-1.5 text-sm hover:bg-border disabled:opacity-60"
+          >
+            <Plus className="w-4 h-4" aria-hidden />
+            <span>{creatingSheet ? 'Creating…' : 'Create a new sheet in my Drive'}</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => void handleInitDashboard()}
+            disabled={dashboardBusy}
+            className="inline-flex items-center gap-1.5 rounded-md border border-border bg-surface-2 px-3 py-1.5 text-sm hover:bg-border disabled:opacity-60"
+          >
+            <FileSpreadsheet className="w-4 h-4" aria-hidden />
+            <span>{dashboardBusy ? 'Building…' : 'Initialize / rebuild Dashboard tab'}</span>
+          </button>
+        </div>
       </div>
 
       {/* Preferences */}
