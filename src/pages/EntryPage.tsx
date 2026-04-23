@@ -204,6 +204,89 @@ export function EntryPage(): JSX.Element {
     return () => window.clearTimeout(id);
   });
 
+  // Queue focus on whatever the "first reasonable input" is for a given day.
+  // The pending-focus effect consumes this after the DOM settles.
+  const queueFocusOnDay = useCallback(
+    (iso: string): void => {
+      const dayList = slots
+        .filter((s) => s.date === iso)
+        .sort((a, b) => (a.start || '').localeCompare(b.start || ''));
+      const incomplete = dayList.find((s) => !isValidHHMM(s.start) || !isValidHHMM(s.end));
+      if (incomplete) {
+        pendingFocusRef.current = {
+          slotId: incomplete.slotId,
+          field: isValidHHMM(incomplete.start) ? 'end' : 'start',
+        };
+        return;
+      }
+      const first = dayList[0];
+      if (first) {
+        pendingFocusRef.current = { slotId: first.slotId, field: 'start' };
+        return;
+      }
+      // Empty day — the day-change effect will add a placeholder and itself
+      // queue focus on the new slot's Start field.
+    },
+    [slots],
+  );
+
+  // Global keyboard shortcuts for day + week navigation. Work regardless of
+  // which input currently has focus so the admin can move between days
+  // without tabbing back up to the week strip first. Uses Alt+arrows /
+  // Alt+PageUp/Down — these don't conflict with text-field caret movement
+  // and the preventDefault silences the browser's Alt+← back-navigation.
+  useEffect(() => {
+    const handler = (e: KeyboardEvent): void => {
+      if (!e.altKey || e.ctrlKey || e.metaKey) return;
+      let direction: 'prev-day' | 'next-day' | 'prev-week' | 'next-week' | null = null;
+      switch (e.key) {
+        case 'ArrowLeft':
+        case 'ArrowUp':
+          direction = 'prev-day';
+          break;
+        case 'ArrowRight':
+        case 'ArrowDown':
+          direction = 'next-day';
+          break;
+        case 'PageUp':
+          direction = 'prev-week';
+          break;
+        case 'PageDown':
+          direction = 'next-week';
+          break;
+        default:
+          return;
+      }
+      e.preventDefault();
+      e.stopPropagation();
+      if (direction === 'prev-day' || direction === 'next-day') {
+        const days = week.weekDaysISO;
+        const idx = days.indexOf(week.selectedDate);
+        if (idx < 0) return;
+        const nextIdx = direction === 'next-day' ? idx + 1 : idx - 1;
+        if (nextIdx < 0) {
+          // Wrap into the previous week's Saturday.
+          week.gotoPrevWeek();
+          return;
+        }
+        if (nextIdx > 6) {
+          week.gotoNextWeek();
+          return;
+        }
+        const target = days[nextIdx];
+        if (target && target !== week.selectedDate) {
+          week.setSelectedDate(target);
+          queueFocusOnDay(target);
+        }
+        return;
+      }
+      if (direction === 'prev-week') week.gotoPrevWeek();
+      if (direction === 'next-week') week.gotoNextWeek();
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [week, queueFocusOnDay]);
+
   const markPending = (slotId: string, next: PendingState): void => {
     setPending((prev) => ({ ...prev, [slotId]: { ...prev[slotId], ...next } }));
   };
@@ -510,11 +593,30 @@ export function EntryPage(): JSX.Element {
             <span className="ml-2">Cancel current edit, revert to saved value</span>
           </li>
           <li>
+            <Kbd>Alt</Kbd>
+            <Kbd>←</Kbd>
+            <span className="mx-1 text-muted">/</span>
+            <Kbd>Alt</Kbd>
+            <Kbd>→</Kbd>
+            <span className="ml-2">
+              Previous / next day — works from any input (also <Kbd>Alt</Kbd>
+              <Kbd>↑</Kbd> / <Kbd>↓</Kbd>)
+            </span>
+          </li>
+          <li>
+            <Kbd>Alt</Kbd>
+            <Kbd>PgUp</Kbd>
+            <span className="mx-1 text-muted">/</span>
+            <Kbd>Alt</Kbd>
+            <Kbd>PgDn</Kbd>
+            <span className="ml-2">Previous / next week</span>
+          </li>
+          <li>
             <Kbd>←</Kbd>
             <Kbd>↑</Kbd>
             <Kbd>↓</Kbd>
             <Kbd>→</Kbd>
-            <span className="ml-2">Change day (from the week strip)</span>
+            <span className="ml-2">Change day when the week strip is focused</span>
           </li>
         </ul>
       </aside>
