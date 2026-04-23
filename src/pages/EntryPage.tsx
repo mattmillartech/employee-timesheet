@@ -71,6 +71,10 @@ export function EntryPage(): JSX.Element {
   // Tracks whether we've applied the smart-default-day pick for the current
   // (employee, week) combo — prevents us from fighting the user on every render.
   const smartDefaultAppliedRef = useRef<string>('');
+  // Which employee's slots are currently in state. `reload` writes this just
+  // before setSlots(fresh); the merged effect gates on it to avoid running
+  // with stale data from the previous employee during the switch.
+  const loadedTabRef = useRef<string>('');
 
   const registerInputFor = useCallback(
     (slotId: string) => (field: 'start' | 'end', el: HTMLInputElement | null): void => {
@@ -100,15 +104,21 @@ export function EntryPage(): JSX.Element {
 
   const reload = useCallback(async (): Promise<void> => {
     if (!selectedTab || !sheetId) return;
+    const forTab = selectedTab;
     setLoading(true);
     setLoadError(null);
     try {
-      const fresh = await run((t) => readEmployeeSlots(sheetId, selectedTab, t));
+      const fresh = await run((t) => readEmployeeSlots(sheetId, forTab, t));
+      // The user may have switched employees mid-fetch — drop stale results.
+      if (forTab !== selectedTab) return;
+      loadedTabRef.current = forTab;
       setSlots(fresh);
     } catch (err) {
-      setLoadError(err instanceof Error ? err.message : String(err));
+      if (forTab === selectedTab) {
+        setLoadError(err instanceof Error ? err.message : String(err));
+      }
     } finally {
-      setLoading(false);
+      if (forTab === selectedTab) setLoading(false);
     }
   }, [run, sheetId, selectedTab]);
 
@@ -117,15 +127,14 @@ export function EntryPage(): JSX.Element {
   }, [reload]);
 
   // When the employee changes, wipe any slot state left over from the previous
-  // employee AND reset the smart-default ref so the merged effect re-runs with
-  // clean inputs once the new employee's data lands. Without this, the smart-
-  // default scan happens against the previous employee's persisted slots and
-  // picks the wrong day (e.g. Monday for an employee with no data because the
-  // previous employee had Sunday filled).
+  // employee, invalidate the loadedTabRef (so the merged effect skips until
+  // reload completes), and reset the smart-default ref so the new scan runs
+  // fresh on the new employee's data.
   useEffect(() => {
     setSlots([]);
     setPending({});
     smartDefaultAppliedRef.current = '';
+    loadedTabRef.current = '';
   }, [selectedTab]);
 
   const slotsByDate = useMemo(() => {
@@ -150,6 +159,11 @@ export function EntryPage(): JSX.Element {
   // PERSISTED slots (rowIndex set) for the smart-default scan fixes it.
   useEffect(() => {
     if (loading || !selectedTab) return;
+    // Critical gate: `slots` in state might still be the previous employee's
+    // data for one render after a dropdown change (setSlots([]) from the
+    // employee-switch effect doesn't commit until the next render). Bail out
+    // until reload() confirms the data matches the selected employee.
+    if (loadedTabRef.current !== selectedTab) return;
     const weekKey = `${selectedTab}:${week.weekDaysISO[0] ?? ''}`;
     // First visit to this (employee, week): pick the first day with no
     // persisted entries and jump to it.
