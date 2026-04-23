@@ -245,9 +245,20 @@ export async function createEmployeeTab(
 export async function updateEmployee(
   sheetId: string,
   employee: Employee,
-  rowIndex: number,
   token: string,
 ): Promise<void> {
+  const rows = await readTab(sheetId, CONFIG_TAB_NAME, token, CONFIG_RANGE);
+  let rowIndex: number | null = null;
+  for (let i = 1; i < rows.length; i++) {
+    const row = rows[i];
+    if (row && row[0] === employee.tabName) {
+      rowIndex = i + 1;
+      break;
+    }
+  }
+  if (rowIndex === null) {
+    throw new SheetsApiError(404, `Employee not found in _Config: ${employee.tabName}`);
+  }
   await updateRow(
     sheetId,
     CONFIG_TAB_NAME,
