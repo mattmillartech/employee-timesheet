@@ -651,16 +651,16 @@ export async function initOrRebuildDashboardTab(
   const dashboardHeader: string[][] = [
     ['Employee Timesheet — Dashboard'],
     [],
+    ['↓ The pivot table below starts at row 8. To reconfigure it:'],
     [
-      'Click anywhere in the pivot below, then use the pivot editor panel on the right to switch views.',
+      '   1. Hover the cursor over the pivot table.',
     ],
     [
-      'Typical reconfigurations: drag Employee to the "Filters" pane to scope to one person, change the',
+      '   2. Click the "Edit" button that appears (top-right of the pivot).',
     ],
     [
-      'Date grouping between Day / Week / Month / Year via the "Group by" dropdown, or add SlotType as a',
+      '   3. Use the editor panel to filter by employee, change the Date grouping (Day / Week / Month / Year / Day-of-Week), or add SlotType as a filter.',
     ],
-    ['Filter to see only "work" vs "break" time.'],
   ];
 
   const allSlotsRows = buildAllSlotsSheetValues(active);
