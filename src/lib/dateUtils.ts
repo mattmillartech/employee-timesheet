@@ -129,8 +129,14 @@ export function shiftRange(kind: RangeKind, anchor: Date, direction: -1 | 1): Da
 
 export {
   addDays,
-  startOfDay,
+  eachDayOfInterval,
   endOfDay,
-  isSameDay,
+  endOfMonth,
+  endOfYear,
   format,
+  isSameDay,
+  startOfDay,
+  startOfMonth,
+  startOfWeek,
+  startOfYear,
 };

@@ -1,6 +1,7 @@
 import {
   CONFIG_RANGE,
   CONFIG_TAB_NAME,
+  DASHBOARD_TAB_NAME,
   DEFAULT_DISPLAY_MODE,
   DEFAULT_TIMEZONE,
   EMPLOYEE_COLUMNS,
@@ -506,6 +507,214 @@ export async function writeAppSetting(
   } else {
     await appendRows(sheetId, SETTINGS_TAB_NAME, [[key, value]], token, SETTINGS_RANGE);
   }
+}
+
+// ============================================================
+// Dashboard sheet tab — live-formula current-week view
+// ============================================================
+
+type SpreadsheetProperties = {
+  sheets?: Array<{
+    properties?: {
+      sheetId?: number;
+      title?: string;
+      index?: number;
+    };
+  }>;
+};
+
+async function listSheetProperties(
+  sheetId: string,
+  token: string,
+): Promise<SpreadsheetProperties> {
+  const url = `${SHEETS_API_BASE}/${sheetId}?fields=sheets(properties(sheetId,title,index))`;
+  return sheetsFetch<SpreadsheetProperties>(url, token);
+}
+
+/**
+ * Idempotent: ensures a `Dashboard` tab exists at index 0, then rewrites its
+ * contents with live formulas showing each active employee's current-week
+ * schedule. Per-cell output looks like "07:00 → 15:00\n8.0h" (via CHAR(10)).
+ *
+ * Call this on first Dashboard page load or whenever the employee list changes.
+ */
+export async function initOrRebuildDashboardTab(
+  sheetId: string,
+  employees: readonly Employee[],
+  token: string,
+): Promise<void> {
+  const props = await listSheetProperties(sheetId, token);
+  const existing = props.sheets?.find((s) => s.properties?.title === DASHBOARD_TAB_NAME);
+  let dashboardSheetId = existing?.properties?.sheetId;
+
+  const requests: unknown[] = [];
+
+  if (dashboardSheetId === undefined) {
+    requests.push({
+      addSheet: {
+        properties: {
+          title: DASHBOARD_TAB_NAME,
+          index: 0,
+          gridProperties: { rowCount: 60, columnCount: 12, frozenRowCount: 6 },
+        },
+      },
+    });
+  } else {
+    // Move to index 0 and clear any stale content beyond row 1.
+    requests.push({
+      updateSheetProperties: {
+        properties: { sheetId: dashboardSheetId, index: 0 },
+        fields: 'index',
+      },
+    });
+    requests.push({
+      updateCells: {
+        range: { sheetId: dashboardSheetId },
+        fields: 'userEnteredValue,userEnteredFormat',
+      },
+    });
+  }
+
+  if (requests.length > 0) {
+    const batchUrl = `${SHEETS_API_BASE}/${sheetId}:batchUpdate`;
+    const result = await sheetsFetch<{
+      replies?: Array<{ addSheet?: { properties?: { sheetId?: number } } }>;
+    }>(batchUrl, token, {
+      method: 'POST',
+      body: JSON.stringify({ requests }),
+    });
+    // If we just added the sheet, pick up its new sheetId for later use.
+    const added = result.replies?.find((r) => r.addSheet)?.addSheet?.properties?.sheetId;
+    if (added !== undefined) dashboardSheetId = added;
+  }
+
+  const active = employees
+    .filter((e) => e.active)
+    .sort((a, b) => a.sortOrder - b.sortOrder);
+
+  const values = buildDashboardRows(active);
+  const endCol = columnLetter(values[0]?.length ?? 1);
+  const endRow = values.length;
+
+  await batchUpdateValues(
+    sheetId,
+    [
+      {
+        range: `${DASHBOARD_TAB_NAME}!A1:${endCol}${endRow}`,
+        values,
+      },
+    ],
+    token,
+  );
+}
+
+function columnLetter(n: number): string {
+  let s = '';
+  let x = n;
+  while (x > 0) {
+    const r = (x - 1) % 26;
+    s = String.fromCharCode(65 + r) + s;
+    x = Math.floor((x - 1) / 26);
+  }
+  return s || 'A';
+}
+
+function buildDashboardRows(activeEmployees: readonly Employee[]): string[][] {
+  const rows: string[][] = [];
+  // Row 1: title
+  rows.push(['Employee Timesheet — Dashboard', '', '', '', '', '', '', '', '']);
+  // Row 2: blank
+  rows.push(['', '', '', '', '', '', '', '', '']);
+  // Row 3: Week label
+  rows.push([
+    'Week',
+    '=TEXT($B$5, "MMM d")&" – "&TEXT($B$5+6, "MMM d, yyyy")',
+    '',
+    '',
+    '',
+    '',
+    '',
+    '',
+    '',
+  ]);
+  // Row 4: blank
+  rows.push(['', '', '', '', '', '', '', '', '']);
+  // Row 5: reference Sunday — editable by user to change the viewed week
+  rows.push([
+    'Week starts (Sunday)',
+    '=TODAY() - WEEKDAY(TODAY(),1)+1',
+    '',
+    '',
+    '',
+    '',
+    '',
+    '',
+    '',
+  ]);
+  // Row 6: column headers
+  rows.push([
+    'Employee',
+    '=TEXT($B$5+0, "ddd\nMMM d")',
+    '=TEXT($B$5+1, "ddd\nMMM d")',
+    '=TEXT($B$5+2, "ddd\nMMM d")',
+    '=TEXT($B$5+3, "ddd\nMMM d")',
+    '=TEXT($B$5+4, "ddd\nMMM d")',
+    '=TEXT($B$5+5, "ddd\nMMM d")',
+    '=TEXT($B$5+6, "ddd\nMMM d")',
+    'TOTAL',
+  ]);
+
+  // Per-employee rows
+  for (const e of activeEmployees) {
+    const tabRef = sheetRef(e.tabName);
+    const cellFormula = (dayOffset: number): string => {
+      const dayExpr = `$B$5+${dayOffset}`;
+      return (
+        `=IFERROR(IF(SUMIFS(${tabRef}!F:F, ${tabRef}!A:A, ${dayExpr})=0, "—", ` +
+        `TEXT(MINIFS(${tabRef}!D:D, ${tabRef}!A:A, ${dayExpr}, ${tabRef}!C:C, "work"), "HH:mm") ` +
+        `&" → "&TEXT(MAXIFS(${tabRef}!E:E, ${tabRef}!A:A, ${dayExpr}, ${tabRef}!C:C, "work"), "HH:mm") ` +
+        `&CHAR(10)&TEXT(SUMIFS(${tabRef}!F:F, ${tabRef}!A:A, ${dayExpr}), "0.0")&"h"), "—")`
+      );
+    };
+    const weekTotalFormula =
+      `=IFERROR(SUMIFS(${tabRef}!F:F, ${tabRef}!A:A, ">="&$B$5, ${tabRef}!A:A, "<="&$B$5+6), 0)`;
+    rows.push([
+      e.displayName,
+      cellFormula(0),
+      cellFormula(1),
+      cellFormula(2),
+      cellFormula(3),
+      cellFormula(4),
+      cellFormula(5),
+      cellFormula(6),
+      weekTotalFormula,
+    ]);
+  }
+
+  // Column totals row
+  const lastDataRow = 6 + activeEmployees.length;
+  const colTotal = (col: string): string =>
+    activeEmployees.length === 0
+      ? ''
+      : `=SUM(${col}7:${col}${lastDataRow})`;
+  rows.push([
+    'TOTAL',
+    colTotal('B'),
+    colTotal('C'),
+    colTotal('D'),
+    colTotal('E'),
+    colTotal('F'),
+    colTotal('G'),
+    colTotal('H'),
+    colTotal('I'),
+  ]);
+
+  return rows;
+}
+
+function sheetRef(tabName: string): string {
+  // Quote the tab name so Sheets accepts hyphens / spaces.
+  return `'${tabName.replace(/'/g, "''")}'`;
 }
 
 export { toISODate };
