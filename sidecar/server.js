@@ -1,8 +1,20 @@
+// Stateless sidecar — no service account, no shared API key. Every /api/*
+// request must carry `Authorization: Bearer <google oauth access token>` and
+// the sheet to operate on comes from `?sheetId=` (or the `:tabName` path
+// param for the per-tab endpoints). The sidecar is a thin proxy that adds:
+//   - per-(sheetId, tabName) async-mutex so concurrent POSTs dedup-upsert
+//     without racing
+//   - zod-validated request body shape
+//   - normalized error responses
+//
+// This makes the container itself carry zero maintainer-specific state —
+// forkers can run the same image against any Google account; anyone cloning
+// the repo cannot touch any specific account.
+
 import express from 'express';
 import { Mutex } from 'async-mutex';
 import { z } from 'zod';
 import {
-  getServiceAccountEmail,
   listEmployees,
   listWeekStarts,
   readSlotsInWeek,
@@ -11,76 +23,67 @@ import {
 
 const app = express();
 const PORT = Number(process.env.SIDECAR_PORT ?? 3001);
-const SHEET_ID = process.env.VITE_SHEET_ID ?? '';
-const AGENT_KEY = process.env.AGENT_API_KEY ?? '';
-
-if (!SHEET_ID) {
-  console.warn('[sidecar] VITE_SHEET_ID is not set — /api/* calls will fail until configured');
-}
-if (!AGENT_KEY) {
-  console.warn('[sidecar] AGENT_API_KEY is not set — /api/* requests will be rejected');
-}
 
 app.disable('x-powered-by');
 app.use(express.json({ limit: '256kb' }));
 
-// =====================
-// Request logging (safe — no bodies, no query)
-// =====================
+// Minimal request log — method + path only, never bodies.
 app.use((req, _res, next) => {
   console.log(`[sidecar] ${req.method} ${req.path}`);
   next();
 });
 
-// =====================
-// Health — no auth required (used by nginx + compose healthcheck)
-// =====================
+// Health — no auth required.
 app.get('/api/health', (_req, res) => {
   res.json({
     status: 'ok',
     service: 'employee-timesheet-sidecar',
-    version: '0.1.0',
-    sheetId: SHEET_ID ? `${SHEET_ID.slice(0, 6)}…` : null,
-    serviceAccount: getServiceAccountEmail(),
+    version: '0.2.0',
+    auth: 'oauth-bearer',
     ts: new Date().toISOString(),
   });
 });
 
-// =====================
-// Auth middleware for /api/* (except /api/health)
-// =====================
+// OAuth bearer middleware for all /api/* except /health.
 app.use('/api', (req, res, next) => {
   if (req.path === '/health') return next();
-  if (!AGENT_KEY) {
-    return res
-      .status(500)
-      .json({ error: 'server_misconfigured', message: 'AGENT_API_KEY not set' });
+  const auth = req.header('authorization') ?? '';
+  const match = /^Bearer\s+(.+)$/i.exec(auth);
+  if (!match) {
+    return res.status(401).json({
+      error: 'missing_bearer_token',
+      message:
+        'Pass a Google OAuth access token as `Authorization: Bearer <token>`. The token determines which Google account the sidecar acts as.',
+    });
   }
-  const provided = req.header('x-agent-key');
-  if (provided !== AGENT_KEY) {
-    return res.status(403).json({ error: 'forbidden', message: 'Missing or invalid X-Agent-Key' });
-  }
-  return next();
+  req.accessToken = match[1].trim();
+  next();
 });
 
-// =====================
-// Per-tab mutex map so concurrent POSTs on the same tab serialize.
-// Prevents duplicate-append races when two agents hit /api/hours/:tab
-// with the same (date,slotType,start) at the same moment.
-// =====================
-const tabMutexes = new Map();
-function mutexFor(tabName) {
-  let m = tabMutexes.get(tabName);
+// Per-(sheetId, tabName) mutex map — prevents duplicate-append races when two
+// callers POST to the same sheet+tab with the same slot key at the same time.
+const mutexes = new Map();
+function mutexFor(key) {
+  let m = mutexes.get(key);
   if (!m) {
     m = new Mutex();
-    tabMutexes.set(tabName, m);
+    mutexes.set(key, m);
   }
   return m;
 }
 
-// =====================
-// Input schemas
-// =====================
+function requireSheetId(req, res) {
+  const sheetId = String(req.query.sheetId ?? '').trim();
+  if (!sheetId) {
+    res.status(400).json({
+      error: 'missing_sheet_id',
+      message: 'Query parameter `sheetId` is required.',
+    });
+    return null;
+  }
+  return sheetId;
+}
+
 const SlotInput = z.object({
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'date must be YYYY-MM-DD'),
   slotType: z.enum(['work', 'break']),
@@ -92,63 +95,65 @@ const SlotInput = z.object({
 });
 const SlotsArray = z.array(SlotInput).min(1).max(200);
 
-// =====================
-// Endpoints
-// =====================
-
-// GET /api/employees
-app.get('/api/employees', async (_req, res) => {
+// GET /api/employees?sheetId=...
+app.get('/api/employees', async (req, res) => {
+  const sheetId = requireSheetId(req, res);
+  if (!sheetId) return;
   try {
-    if (!SHEET_ID) return res.status(500).json({ error: 'no_sheet_id' });
-    const employees = await listEmployees(SHEET_ID);
-    res.json(employees);
+    res.json(await listEmployees(sheetId, req.accessToken));
   } catch (err) {
     sendError(res, err);
   }
 });
 
-// GET /api/hours/:tabName?weekStart=YYYY-MM-DD
+// GET /api/hours/:tabName?sheetId=...&weekStart=YYYY-MM-DD
 app.get('/api/hours/:tabName', async (req, res) => {
+  const sheetId = requireSheetId(req, res);
+  if (!sheetId) return;
+  const weekStart = String(req.query.weekStart ?? '');
+  if (!weekStart) {
+    return res
+      .status(400)
+      .json({ error: 'missing_weekStart', message: 'weekStart=YYYY-MM-DD is required' });
+  }
   try {
-    if (!SHEET_ID) return res.status(500).json({ error: 'no_sheet_id' });
-    const tabName = req.params.tabName;
-    const weekStart = String(req.query.weekStart ?? '');
-    if (!weekStart) {
-      return res
-        .status(400)
-        .json({ error: 'missing_weekStart', message: 'weekStart=YYYY-MM-DD is required' });
-    }
-    const slots = await readSlotsInWeek(SHEET_ID, tabName, weekStart);
+    const slots = await readSlotsInWeek(
+      sheetId,
+      req.params.tabName,
+      weekStart,
+      req.accessToken,
+    );
     res.json(slots);
   } catch (err) {
     sendError(res, err);
   }
 });
 
-// GET /api/weeks/:tabName
+// GET /api/weeks/:tabName?sheetId=...
 app.get('/api/weeks/:tabName', async (req, res) => {
+  const sheetId = requireSheetId(req, res);
+  if (!sheetId) return;
   try {
-    if (!SHEET_ID) return res.status(500).json({ error: 'no_sheet_id' });
-    const weeks = await listWeekStarts(SHEET_ID, req.params.tabName);
-    res.json(weeks);
+    res.json(await listWeekStarts(sheetId, req.params.tabName, req.accessToken));
   } catch (err) {
     sendError(res, err);
   }
 });
 
-// POST /api/hours/:tabName
+// POST /api/hours/:tabName?sheetId=...
 app.post('/api/hours/:tabName', async (req, res) => {
-  const tabName = req.params.tabName;
+  const sheetId = requireSheetId(req, res);
+  if (!sheetId) return;
+  const { tabName } = req.params;
   try {
-    if (!SHEET_ID) return res.status(500).json({ error: 'no_sheet_id' });
     const parsed = SlotsArray.safeParse(req.body);
     if (!parsed.success) {
       return res
         .status(400)
         .json({ error: 'invalid_body', issues: parsed.error.issues });
     }
-    const result = await mutexFor(tabName).runExclusive(() =>
-      upsertSlots(SHEET_ID, tabName, parsed.data),
+    const result = await mutexFor(`${sheetId}:${tabName}`).runExclusive(() =>
+      upsertSlots(sheetId, tabName, parsed.data, req.accessToken),
     );
     res.json({ ok: true, ...result });
   } catch (err) {
@@ -163,7 +168,7 @@ app.use((_req, res) => {
 function sendError(res, err) {
   const status = typeof err?.status === 'number' ? err.status : 500;
   const code = err?.code ?? err?.name ?? 'error';
-  const upstream = err?.response?.data?.error?.message ?? null;
+  const upstream = err?.upstream?.error?.message ?? null;
   console.error('[sidecar] error:', err?.message ?? err, upstream ?? '');
   res.status(status).json({
     error: code,
@@ -173,5 +178,5 @@ function sendError(res, err) {
 }
 
 app.listen(PORT, '127.0.0.1', () => {
-  console.log(`[sidecar] listening on 127.0.0.1:${PORT}`);
+  console.log(`[sidecar] listening on 127.0.0.1:${PORT} — OAuth bearer auth`);
 });

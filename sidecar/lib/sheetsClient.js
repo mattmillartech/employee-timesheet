@@ -1,42 +1,49 @@
-import { google } from 'googleapis';
-import { GoogleAuth } from 'google-auth-library';
+// Stateless Sheets client for the sidecar. Every call takes the caller's own
+// OAuth access token — there are no service-account credentials anywhere in
+// the sidecar. The sidecar is a thin proxy that adds per-(sheet, tab) mutex
+// locking + zod-validated upsert-by-key semantics on top of the raw Sheets
+// REST API. It's safe to run anywhere by anyone.
 
-const SCOPES = ['https://www.googleapis.com/auth/spreadsheets'];
-
+const SHEETS_API_BASE = 'https://sheets.googleapis.com/v4/spreadsheets';
 const CONFIG_TAB = '_Config';
-const EMPLOYEE_COLUMNS = ['date', 'day', 'slotType', 'start', 'end', 'hours', 'notes'];
 const DAY_ABBREV = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
-let sheetsClient = null;
-let authClient = null;
-
-function initSheetsClient() {
-  if (sheetsClient) return sheetsClient;
-  const credsRaw = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
-  if (!credsRaw) {
-    throw new Error('GOOGLE_SERVICE_ACCOUNT_JSON env var is not set');
+export class SheetsError extends Error {
+  constructor(status, message, upstream) {
+    super(message);
+    this.name = 'SheetsError';
+    this.status = status;
+    this.upstream = upstream;
   }
-  let credentials;
-  try {
-    credentials = JSON.parse(credsRaw);
-  } catch (err) {
-    throw new Error(
-      `GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON (did you forget to single-quote it in .env so \\n survives?): ${err.message}`,
-    );
-  }
-  authClient = new GoogleAuth({ credentials, scopes: SCOPES });
-  sheetsClient = google.sheets({ version: 'v4', auth: authClient });
-  return sheetsClient;
 }
 
-export function getServiceAccountEmail() {
-  const credsRaw = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
-  if (!credsRaw) return null;
-  try {
-    return JSON.parse(credsRaw).client_email ?? null;
-  } catch {
-    return null;
+async function sheetsFetch(url, token, init) {
+  const res = await fetch(url, {
+    ...init,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+      ...(init?.headers ?? {}),
+    },
+  });
+  const text = await res.text();
+  let body = null;
+  if (text) {
+    try {
+      body = JSON.parse(text);
+    } catch {
+      body = text;
+    }
   }
+  if (!res.ok) {
+    const message = body?.error?.message ?? `Sheets API ${res.status}`;
+    throw new SheetsError(res.status, message, body);
+  }
+  return body;
+}
+
+function encodeRange(tab, range) {
+  return encodeURIComponent(`${tab}!${range}`);
 }
 
 function addDaysISO(iso, days) {
@@ -66,13 +73,20 @@ function isValidISODate(iso) {
   );
 }
 
-export async function listEmployees(sheetId) {
-  const sheets = initSheetsClient();
-  const res = await sheets.spreadsheets.values.get({
-    spreadsheetId: sheetId,
-    range: `${CONFIG_TAB}!A:E`,
-  });
-  const rows = res.data.values ?? [];
+async function tabExists(sheetId, tabName, token) {
+  const url = `${SHEETS_API_BASE}/${sheetId}?fields=sheets(properties(title))`;
+  const data = await sheetsFetch(url, token);
+  return (data.sheets ?? []).some((s) => s.properties?.title === tabName);
+}
+
+async function getValues(sheetId, tabName, range, token) {
+  const url = `${SHEETS_API_BASE}/${sheetId}/values/${encodeRange(tabName, range)}`;
+  const data = await sheetsFetch(url, token);
+  return data.values ?? [];
+}
+
+export async function listEmployees(sheetId, token) {
+  const rows = await getValues(sheetId, CONFIG_TAB, 'A:E', token);
   if (rows.length <= 1) return [];
   return rows
     .slice(1)
@@ -87,28 +101,11 @@ export async function listEmployees(sheetId) {
     .sort((a, b) => a.sortOrder - b.sortOrder);
 }
 
-async function tabExists(sheetId, tabName) {
-  const sheets = initSheetsClient();
-  const res = await sheets.spreadsheets.get({
-    spreadsheetId: sheetId,
-    fields: 'sheets(properties(title))',
-  });
-  const titles = (res.data.sheets ?? []).map((s) => s.properties?.title);
-  return titles.includes(tabName);
-}
-
-export async function readSlots(sheetId, tabName) {
-  if (!(await tabExists(sheetId, tabName))) {
-    const err = new Error(`Employee tab not found: ${tabName}`);
-    err.status = 404;
-    throw err;
+export async function readSlots(sheetId, tabName, token) {
+  if (!(await tabExists(sheetId, tabName, token))) {
+    throw new SheetsError(404, `Employee tab not found: ${tabName}`);
   }
-  const sheets = initSheetsClient();
-  const res = await sheets.spreadsheets.values.get({
-    spreadsheetId: sheetId,
-    range: `${tabName}!A:G`,
-  });
-  const rows = res.data.values ?? [];
+  const rows = await getValues(sheetId, tabName, 'A:G', token);
   const slots = [];
   for (let i = 1; i < rows.length; i++) {
     const row = rows[i];
@@ -127,78 +124,17 @@ export async function readSlots(sheetId, tabName) {
   return slots;
 }
 
-export async function readSlotsInWeek(sheetId, tabName, weekStartISO) {
+export async function readSlotsInWeek(sheetId, tabName, weekStartISO, token) {
   if (!isValidISODate(weekStartISO)) {
-    const err = new Error(`weekStart must be a valid YYYY-MM-DD date (got: ${weekStartISO})`);
-    err.status = 400;
-    throw err;
+    throw new SheetsError(400, `weekStart must be YYYY-MM-DD (got: ${weekStartISO})`);
   }
-  const slots = await readSlots(sheetId, tabName);
+  const slots = await readSlots(sheetId, tabName, token);
   const endISO = addDaysISO(weekStartISO, 6);
   return slots.filter((s) => s.date >= weekStartISO && s.date <= endISO);
 }
 
-/** Dedup-on-write. Assumes the caller holds a per-tab mutex. */
-export async function upsertSlots(sheetId, tabName, slots) {
-  if (!(await tabExists(sheetId, tabName))) {
-    const err = new Error(`Employee tab not found: ${tabName}`);
-    err.status = 404;
-    throw err;
-  }
-  const sheets = initSheetsClient();
-  const existing = await readSlots(sheetId, tabName);
-  const byKey = new Map();
-  for (const s of existing) {
-    byKey.set(`${s.date}|${s.slotType}|${s.start}`, s);
-  }
-
-  const updates = [];
-  const appends = [];
-
-  for (const s of slots) {
-    const day = s.day || dayAbbrevForISO(s.date);
-    const row = [s.date, day, s.slotType, s.start, s.end, s.hours, s.notes ?? ''];
-    const key = `${s.date}|${s.slotType}|${s.start}`;
-    const match = byKey.get(key);
-    if (match) {
-      updates.push({
-        range: `${tabName}!A${match.rowIndex}:G${match.rowIndex}`,
-        values: [row],
-      });
-    } else {
-      appends.push(row);
-    }
-  }
-
-  if (updates.length > 0) {
-    await sheets.spreadsheets.values.batchUpdate({
-      spreadsheetId: sheetId,
-      requestBody: { valueInputOption: 'USER_ENTERED', data: updates },
-    });
-  }
-  if (appends.length > 0) {
-    await sheets.spreadsheets.values.append({
-      spreadsheetId: sheetId,
-      range: `${tabName}!A:G`,
-      valueInputOption: 'USER_ENTERED',
-      insertDataOption: 'INSERT_ROWS',
-      requestBody: { values: appends },
-    });
-  }
-
-  return {
-    updated: updates.length,
-    appended: appends.length,
-    total: updates.length + appends.length,
-  };
-}
-
-/**
- * List the distinct Sunday-start dates that have at least one slot.
- * Returns ISO dates sorted descending (most recent first).
- */
-export async function listWeekStarts(sheetId, tabName) {
-  const slots = await readSlots(sheetId, tabName);
+export async function listWeekStarts(sheetId, tabName, token) {
+  const slots = await readSlots(sheetId, tabName, token);
   const sundays = new Set();
   for (const s of slots) {
     const [y, m, d] = s.date.split('-').map(Number);
@@ -213,4 +149,55 @@ export async function listWeekStarts(sheetId, tabName) {
   return Array.from(sundays).sort((a, b) => b.localeCompare(a));
 }
 
-export { EMPLOYEE_COLUMNS };
+/** Upsert slots by (date, slotType, start). Caller must hold a per-(sheet,tab) mutex. */
+export async function upsertSlots(sheetId, tabName, slots, token) {
+  if (!(await tabExists(sheetId, tabName, token))) {
+    throw new SheetsError(404, `Employee tab not found: ${tabName}`);
+  }
+  const existing = await readSlots(sheetId, tabName, token);
+  const byKey = new Map();
+  for (const s of existing) byKey.set(`${s.date}|${s.slotType}|${s.start}`, s);
+
+  const updates = [];
+  const appends = [];
+  for (const s of slots) {
+    const day = s.day || dayAbbrevForISO(s.date);
+    const row = [s.date, day, s.slotType, s.start, s.end, s.hours, s.notes ?? ''];
+    const match = byKey.get(`${s.date}|${s.slotType}|${s.start}`);
+    if (match) {
+      updates.push({
+        range: `${tabName}!A${match.rowIndex}:G${match.rowIndex}`,
+        values: [row],
+      });
+    } else {
+      appends.push(row);
+    }
+  }
+
+  if (updates.length > 0) {
+    await sheetsFetch(
+      `${SHEETS_API_BASE}/${sheetId}/values:batchUpdate`,
+      token,
+      {
+        method: 'POST',
+        body: JSON.stringify({ valueInputOption: 'USER_ENTERED', data: updates }),
+      },
+    );
+  }
+  if (appends.length > 0) {
+    await sheetsFetch(
+      `${SHEETS_API_BASE}/${sheetId}/values/${encodeRange(tabName, 'A:G')}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,
+      token,
+      {
+        method: 'POST',
+        body: JSON.stringify({ values: appends }),
+      },
+    );
+  }
+
+  return {
+    updated: updates.length,
+    appended: appends.length,
+    total: updates.length + appends.length,
+  };
+}

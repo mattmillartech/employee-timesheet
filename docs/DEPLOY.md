@@ -4,6 +4,13 @@ Runbook for standing the timesheet webapp up behind a reverse proxy on any
 VPS. Reference deployment uses a git-based Portainer stack + Nginx Proxy
 Manager for TLS — substitute your own Docker host and proxy if you prefer.
 
+The container is **stateless on the backend**: no service-account JSON, no
+shared API key, no maintainer-specific secrets. The only build-time value
+that's tied to a GCP project is the OAuth Client ID (which is public by
+design). Everything else — the sheet, the signed-in user, the agent's
+access token — is resolved per-request. That's what makes the repo safe
+for anyone to fork and deploy to their own accounts.
+
 Placeholders used throughout:
 
 - `$DEPLOY_HOSTNAME` — e.g. `timesheet.example.com`
@@ -16,11 +23,13 @@ Placeholders used throughout:
 
 You need:
 
-- A Google Sheet with a header row on `_Config` tab — the app creates the rest.
-- A service account JSON key with the **Google Sheets API** enabled (free tier).
-- The service account's `client_email` shared as **Editor** on the Sheet.
-- A Google OAuth 2.0 **Web Client** (also free) — note the Client ID.
+- A Google OAuth 2.0 **Web Client** in your own GCP project — note the Client ID.
 - Portainer-UI or API access to the target Docker host.
+
+That's it. Each user who signs in either reuses their existing sheet
+(via localStorage) or auto-creates a fresh one in their own Google
+Drive on first sign-in; no server-side sheet provisioning needed.
+Programmatic callers of `/api/*` bring their own OAuth access token.
 
 See the [README](../README.md#google-cloud-setup) for the GCP walkthrough.
 
@@ -65,7 +74,7 @@ TOKEN=$(curl -s -X POST "$PORTAINER_URL/api/auth" \
   | python3 -c "import sys,json; print(json.load(sys.stdin)['jwt'])")
 ```
 
-Create a git-based stack (single-quoted heredoc avoids shell expansion on the env values):
+Create a git-based stack:
 
 ```bash
 PAYLOAD=$(python3 -c "
@@ -77,10 +86,12 @@ print(json.dumps({
   'composeFile': 'docker-compose.yml',
   'env': [
     {'name': 'VITE_GOOGLE_CLIENT_ID', 'value': os.environ['OAUTH_CLIENT_ID']},
-    {'name': 'VITE_ALLOWED_GOOGLE_EMAIL', 'value': os.environ['ALLOWED_EMAIL']},
-    {'name': 'VITE_SHEET_ID', 'value': os.environ['SHEET_ID']},
-    {'name': 'GOOGLE_SERVICE_ACCOUNT_JSON', 'value': os.environ['SA_JSON']},
-    {'name': 'AGENT_API_KEY', 'value': os.environ['AGENT_API_KEY']}
+    # Optional: comma-separated allowlist. Leave empty to allow any account
+    # that passes your GCP consent screen.
+    {'name': 'VITE_ALLOWED_GOOGLE_EMAIL', 'value': os.environ.get('ALLOWED_EMAILS', '')},
+    # Optional: default sheet id baked into the bundle. Leave empty for
+    # multi-user — each user gets a sheet auto-created in their Drive.
+    {'name': 'VITE_SHEET_ID', 'value': os.environ.get('DEFAULT_SHEET_ID', '')},
   ]
 }))
 ")
@@ -92,13 +103,16 @@ curl -s -X POST \
   -d "$PAYLOAD"
 ```
 
-**Generate `AGENT_API_KEY`:**
+That's the whole env surface:
 
-```bash
-node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
-```
+| Variable | Required? | What |
+|---|---|---|
+| `VITE_GOOGLE_CLIENT_ID` | yes | OAuth 2.0 Web Client ID from your GCP project. Public — baked into the JS bundle. |
+| `VITE_ALLOWED_GOOGLE_EMAIL` | no | Comma-separated allowlist. Empty = any GCP-approved Google account. |
+| `VITE_SHEET_ID` | no | Default sheet id. Empty = first sign-in auto-creates one in the user's Drive. |
 
-**`GOOGLE_SERVICE_ACCOUNT_JSON` must be single-line.** Use `JSON.stringify(JSON.parse(raw))` or `python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)))" < key.json`. If the sidecar logs `JSON.parse` failures or `DECODER routines::unsupported` after boot, the `\n` inside `private_key` was stripped — re-paste with escapes intact.
+No `GOOGLE_SERVICE_ACCOUNT_JSON`. No `AGENT_API_KEY`. No maintainer
+secrets. The container stores nothing account-specific.
 
 ## 4 · Reverse proxy / TLS (NPM example)
 
@@ -121,13 +135,15 @@ curl -I "https://$DEPLOY_HOSTNAME/"
 # expect HTTP/2 200
 
 curl "https://$DEPLOY_HOSTNAME/api/health"
-# expect 200 with service metadata
+# expect 200 { "auth": "oauth-bearer", ... }
 
-curl -H "X-Agent-Key: $AGENT_API_KEY" "https://$DEPLOY_HOSTNAME/api/employees"
-# expect JSON array of employees (empty [] until you add some)
+# Programmatic /api/* call (replace TOKEN + SHEET_ID with yours):
+ACCESS_TOKEN=$(gcloud auth application-default print-access-token)
+curl -H "Authorization: Bearer $ACCESS_TOKEN" \
+  "https://$DEPLOY_HOSTNAME/api/employees?sheetId=<spreadsheet-id>"
 ```
 
-Then hit the URL in a browser, sign in with the allowlisted Google account, verify Dashboard loads.
+Then hit the URL in a browser, sign in, verify the Dashboard loads.
 
 ## 6 · Redeploying
 
@@ -148,7 +164,9 @@ For hands-off redeploys, configure Portainer's git webhook and point your GitHub
 ## 7 · Troubleshooting
 
 - **`redirect_uri_mismatch` or `origin_mismatch` on sign-in.** The OAuth client is missing `https://$DEPLOY_HOSTNAME` in its Authorized JavaScript origins list. Re-check step 2.
-- **`403 forbidden` on `/api/*`.** Your `X-Agent-Key` header value doesn't match the `AGENT_API_KEY` env var in the stack. Check for trailing whitespace.
-- **Sidecar 500s with `invalid_grant` or `DECODER routines::unsupported`.** `GOOGLE_SERVICE_ACCOUNT_JSON` was pasted with mangled `\n` sequences in `private_key`. Redeploy with clean single-line JSON.
+- **`401 missing_bearer_token` from `/api/*`.** You didn't pass `Authorization: Bearer <oauth-access-token>`. Health is unauthenticated but every other endpoint requires a Google OAuth token.
+- **`400 missing_sheet_id` from `/api/*`.** Add `?sheetId=<spreadsheet-id>` to the request.
+- **`401` / `403` from `/api/*` after the token is supplied.** Token is invalid, expired, or missing the `https://www.googleapis.com/auth/spreadsheets` scope. Mint a fresh one.
+- **Sheet returns `permission denied`.** The authenticated account doesn't have access to that sheet — share it with them (or a service account whose key is producing the token).
 - **Dashboard tab doesn't update.** Hit "Sync to sheet" in the app header or "Initialize / rebuild Dashboard tab" in Settings. The app auto-rebuilds on employee add / reorder / toggle.
-- **Container restart loop.** Check the container logs in Portainer; usually an nginx config syntax error or a sidecar boot error. The Dockerfile's HEALTHCHECK pings `/api/health`, so Portainer flags unhealthy containers in red.
+- **Container restart loop.** Check container logs in Portainer; usually an nginx config syntax error or a sidecar boot error. The Dockerfile's HEALTHCHECK pings `/api/health`, so Portainer flags unhealthy containers in red.

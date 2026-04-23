@@ -178,35 +178,61 @@ Pushing to `main` + redeploying the Portainer stack ships a new version.
 
 ## AI Agent API
 
-All `/api/*` requests (except `/api/health`) require the
-`X-Agent-Key: $AGENT_API_KEY` header. Base URL is your deploy origin
-(e.g. `https://timesheet.example.com`).
+All `/api/*` requests (except `/api/health`) take two inputs:
 
-### `GET /api/employees`
+1. **`Authorization: Bearer <access-token>`** — a Google OAuth 2.0 access
+   token with scope `https://www.googleapis.com/auth/spreadsheets`. The
+   token identifies the Google account the sidecar acts as; the sidecar
+   never uses its own credentials. Anything the token owner can do in the
+   Sheets API, they can do here.
+2. **`?sheetId=<spreadsheet-id>`** — which spreadsheet to operate on. Must
+   be a sheet the authenticated account can read / write.
+
+The sidecar holds no maintainer state; running the image against any
+Google account is a matter of pointing an access token at it.
+
+Base URL in the examples: substitute your deploy origin.
+
+### Obtaining an access token
+
+Any of these work:
+
+- **Service account flow (recommended for automated agents):** create a
+  service account in GCP, download its JSON key, share your Google Sheet
+  with `<service-account>@...iam.gserviceaccount.com` as Editor. Exchange
+  the key for an access token on the fly (most Google SDKs do this
+  automatically — Node's `google-auth-library`, Python's
+  `google.auth.default()`, etc.).
+- **Authorized-user / 3-legged OAuth flow:** for an agent acting on a
+  specific human's data. Store the refresh token; exchange for access
+  tokens as needed.
+- **`gcloud auth application-default print-access-token`** for local one-off
+  testing (uses your gcloud user credentials).
+
+### `GET /api/employees?sheetId=<id>`
 
 ```bash
-curl -H "X-Agent-Key: $AGENT_KEY" \
-  https://timesheet.example.com/api/employees
+curl -H "Authorization: Bearer $ACCESS_TOKEN" \
+  "https://<deploy>/api/employees?sheetId=$SHEET_ID"
 ```
 
-Returns an array of `{ tabName, displayName, active, color, sortOrder }`,
-sorted ascending by `sortOrder`.
+Returns `{ tabName, displayName, active, color, sortOrder }[]`, sorted
+ascending by `sortOrder`.
 
-### `GET /api/hours/:tabName?weekStart=YYYY-MM-DD`
+### `GET /api/hours/:tabName?sheetId=<id>&weekStart=YYYY-MM-DD`
 
 ```bash
-curl "https://timesheet.example.com/api/hours/jane-smith?weekStart=2026-04-19" \
-  -H "X-Agent-Key: $AGENT_KEY"
+curl "https://<deploy>/api/hours/jane-smith?sheetId=$SHEET_ID&weekStart=2026-04-19" \
+  -H "Authorization: Bearer $ACCESS_TOKEN"
 ```
 
 Returns the array of slots for the 7 days starting on `weekStart` (Sunday).
-`weekStart` is validated as a real YYYY-MM-DD date.
 
-### `POST /api/hours/:tabName`
+### `POST /api/hours/:tabName?sheetId=<id>`
 
 ```bash
-curl -X POST https://timesheet.example.com/api/hours/jane-smith \
-  -H "X-Agent-Key: $AGENT_KEY" \
+curl -X POST "https://<deploy>/api/hours/jane-smith?sheetId=$SHEET_ID" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
   -H "Content-Type: application/json" \
   -d '[
     {"date":"2026-04-13","slotType":"work","start":"08:00","end":"16:00","hours":8.00,"notes":""},
@@ -215,42 +241,46 @@ curl -X POST https://timesheet.example.com/api/hours/jane-smith \
 ```
 
 Body is a zod-validated array (1–200 slots). Each slot is keyed by
-`(date, slotType, start)` — if a matching row exists, it's **updated in
-place**; otherwise a new row is appended. Writes on the same tab are
-serialized by a per-tab async-mutex so two concurrent agents cannot race
-to create duplicate rows.
+`(date, slotType, start)` — matching row → **updated in place**;
+otherwise appended. Writes on the same `(sheetId, tabName)` pair are
+serialized by a per-pair async-mutex, so two concurrent agents cannot
+race to create duplicate rows.
 
-### `GET /api/weeks/:tabName`
+### `GET /api/weeks/:tabName?sheetId=<id>`
 
 ```bash
-curl -H "X-Agent-Key: $AGENT_KEY" \
-  https://timesheet.example.com/api/weeks/jane-smith
+curl -H "Authorization: Bearer $ACCESS_TOKEN" \
+  "https://<deploy>/api/weeks/jane-smith?sheetId=$SHEET_ID"
 ```
 
 Returns the list of Sunday-start dates (descending) that have at least one
-slot for this employee. Useful for picking a default week when bulk-loading
-a new agent.
+slot for this employee.
 
 ### `GET /api/health`
 
-Unprotected. Returns `{ status: "ok", service, version, sheetId (6-char prefix), serviceAccount, ts }`.
+Unprotected. Returns `{ status, service, version, auth: "oauth-bearer", ts }`.
 
 ### Agent prompt block (drop into your agent's system prompt)
 
-> You have access to an hours tracking API at `https://timesheet.example.com`.
-> Include the header `X-Agent-Key: <provided separately>` on every request
-> except `/api/health`.
+> You have access to an hours tracking API. Base URL: `<deploy-url>`.
 >
-> - `GET /api/employees` returns the list of employees.
-> - `GET /api/hours/<tabName>?weekStart=<YYYY-MM-DD>` returns the week's slots.
-> - `POST /api/hours/<tabName>` accepts a JSON array of slots:
+> On every request (except `/api/health`):
+> - Set header `Authorization: Bearer <access-token>` — a Google OAuth 2.0
+>   token with the `https://www.googleapis.com/auth/spreadsheets` scope.
+>   The token determines which Google account the API acts as.
+> - Set query param `sheetId=<spreadsheet-id>` — must be a sheet the
+>   authenticated account can access.
+>
+> - `GET /api/employees?sheetId=...` returns the list of employees.
+> - `GET /api/hours/<tabName>?sheetId=...&weekStart=<YYYY-MM-DD>` returns the
+>   week's slots.
+> - `POST /api/hours/<tabName>?sheetId=...` accepts a JSON array of slots:
 >   `{ date: "YYYY-MM-DD", slotType: "work" | "break", start: "HH:MM" (24h), end: "HH:MM" (24h), hours: number, notes?: string }`
-> - `hours` is a decimal number. For work slots it's positive (`8.5` = 8h 30min).
->   For break slots it's **negative** so the total for the day subtracts correctly.
-> - Dates are ISO YYYY-MM-DD. Times are HH:MM in 24-hour format.
-> - When given a paper timesheet image, first call `/api/employees` to map each
->   person's displayed name to their `tabName`, then batch-POST the day's slots
->   for that employee. Dedup happens server-side by `(date, slotType, start)`.
+> - `hours` is a decimal number. Work slots positive (`8.5` = 8h 30min).
+>   Break slots **negative** so daily totals subtract correctly.
+> - When given a paper timesheet image, first call `/api/employees` to map
+>   person's name → `tabName`, then batch-POST the day's slots for that
+>   employee. Dedup happens server-side by `(date, slotType, start)`.
 
 ## Troubleshooting
 

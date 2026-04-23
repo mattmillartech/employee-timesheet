@@ -15,10 +15,9 @@ services:
     container_name: timesheet
     restart: unless-stopped
     environment:
-      # Build-time VITE_SHEET_ID is also needed by the sidecar at runtime.
-      VITE_SHEET_ID: ${VITE_SHEET_ID:-}
-      GOOGLE_SERVICE_ACCOUNT_JSON: ${GOOGLE_SERVICE_ACCOUNT_JSON:-}
-      AGENT_API_KEY: ${AGENT_API_KEY:-}
+      # Sidecar is stateless — no runtime secrets required. Each /api/*
+      # request carries its own OAuth bearer token and ?sheetId= query param.
+      NODE_ENV: production
     ports:
       - "3000:80"
     networks:
