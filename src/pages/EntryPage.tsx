@@ -129,33 +129,41 @@ export function EntryPage(): JSX.Element {
     return map;
   }, [slots]);
 
-  // Smart default day: on employee/week change, jump to the first day of this
-  // week that has no entries. If every day is populated, leave Sunday selected.
+  // Merged smart-default + auto-add-placeholder effect.
+  //
+  // Previous implementation split these into two effects which raced: the
+  // auto-add effect dropped an empty placeholder onto Sunday BEFORE
+  // smart-default had time to pick the first empty day, so smart-default saw
+  // "Sunday has 1 slot" and advanced to Monday. Merging them + counting only
+  // PERSISTED slots (rowIndex set) for the smart-default scan fixes it.
   useEffect(() => {
     if (loading || !selectedTab) return;
-    const key = `${selectedTab}:${week.weekDaysISO[0] ?? ''}`;
-    if (smartDefaultAppliedRef.current === key) return;
-    for (const iso of week.weekDaysISO) {
-      if ((slotsByDate.get(iso)?.length ?? 0) === 0) {
-        if (week.selectedDate !== iso) week.setSelectedDate(iso);
-        smartDefaultAppliedRef.current = key;
-        return;
+    const weekKey = `${selectedTab}:${week.weekDaysISO[0] ?? ''}`;
+    // First visit to this (employee, week): pick the first day with no
+    // persisted entries and jump to it.
+    if (smartDefaultAppliedRef.current !== weekKey) {
+      smartDefaultAppliedRef.current = weekKey;
+      for (const iso of week.weekDaysISO) {
+        const hasPersisted = slots.some((s) => s.date === iso && s.rowIndex !== undefined);
+        if (!hasPersisted) {
+          if (week.selectedDate !== iso) {
+            week.setSelectedDate(iso);
+            return; // next render will fall through to the placeholder branch
+          }
+          break;
+        }
       }
     }
-    smartDefaultAppliedRef.current = key;
-  }, [loading, selectedTab, slotsByDate, week]);
-
-  // Auto-add one empty work slot whenever the selected day has none — so the
-  // admin lands on a ready-to-type row without clicking "Add work slot".
-  useEffect(() => {
-    if (loading || !selectedTab) return;
-    const current = slotsByDate.get(week.selectedDate) ?? [];
-    if (current.length === 0) {
+    // Placeholder branch: ensure the currently selected day has at least one
+    // row ready for input — the admin should never have to click "Add work
+    // slot" before typing on a blank day.
+    const currentCount = slots.filter((s) => s.date === week.selectedDate).length;
+    if (currentCount === 0) {
       const fresh = newSlot(week.selectedDate, 'work');
       setSlots((prev) => [...prev, fresh]);
       pendingFocusRef.current = { slotId: fresh.slotId, field: 'start' };
     }
-  }, [loading, selectedTab, week.selectedDate, slotsByDate]);
+  }, [loading, selectedTab, slots, week]);
 
   // Consume pendingFocusRef after each render — the new input has had a chance
   // to mount and register itself, so we can now focus it.

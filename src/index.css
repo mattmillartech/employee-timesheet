@@ -48,6 +48,24 @@ body {
   font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  /* Tell the browser we support both light and dark UI chrome so native
+     <select> panels, scrollbars, and date pickers follow the current theme. */
+  color-scheme: light dark;
+}
+
+/* Chromium-family browsers only partially style <option>, but these rules +
+   color-scheme above make the native dropdown panel render legibly in dark
+   mode (otherwise options come back as light-blue text on a white panel). */
+select,
+input,
+textarea,
+button {
+  color-scheme: light dark;
+}
+
+select option {
+  background-color: var(--color-surface);
+  color: var(--color-fg);
 }
 
 /* Tabular numerals for time + hour displays */

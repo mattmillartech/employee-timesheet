@@ -1,6 +1,7 @@
 export const CONFIG_TAB_NAME = '_Config';
 export const SETTINGS_TAB_NAME = '_Settings';
 export const DASHBOARD_TAB_NAME = 'Dashboard';
+export const ALL_SLOTS_TAB_NAME = '_AllSlots';
 
 export const SETTINGS_COLUMNS = ['key', 'value'] as const;
 export const SETTINGS_RANGE = 'A:B';
@@ -29,6 +30,7 @@ export const CONFIG_COLUMNS = ['tabName', 'displayName', 'active', 'color', 'sor
 export const CONFIG_RANGE = 'A:E';
 
 export const LOCALSTORAGE_SHEET_ID_KEY = 'hoursTrackerSheetId';
+export const LOCALSTORAGE_AUTH_SESSION_KEY = 'timesheetAuthSession';
 
 export const TOKEN_EXPIRY_BUFFER_MS = 60_000;
 

@@ -8,7 +8,12 @@ import {
   useState,
   type ReactNode,
 } from 'react';
-import { ENV, SCOPES, TOKEN_EXPIRY_BUFFER_MS } from '@/lib/constants';
+import {
+  ENV,
+  LOCALSTORAGE_AUTH_SESSION_KEY,
+  SCOPES,
+  TOKEN_EXPIRY_BUFFER_MS,
+} from '@/lib/constants';
 import { fetchUserInfo } from '@/lib/sheetsApi';
 
 export type AuthStatus =
@@ -39,6 +44,46 @@ type AuthContextValue = AuthState & {
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
+type StoredSession = {
+  email: string;
+  token: string;
+  expiresAt: number;
+};
+
+function readStoredSession(): StoredSession | null {
+  try {
+    const raw = localStorage.getItem(LOCALSTORAGE_AUTH_SESSION_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<StoredSession>;
+    if (
+      typeof parsed.email === 'string' &&
+      typeof parsed.token === 'string' &&
+      typeof parsed.expiresAt === 'number'
+    ) {
+      return { email: parsed.email, token: parsed.token, expiresAt: parsed.expiresAt };
+    }
+  } catch {
+    // malformed blob — fall through to null
+  }
+  return null;
+}
+
+function writeStoredSession(session: StoredSession): void {
+  try {
+    localStorage.setItem(LOCALSTORAGE_AUTH_SESSION_KEY, JSON.stringify(session));
+  } catch {
+    // localStorage might be disabled; silent-fail is fine.
+  }
+}
+
+function clearStoredSession(): void {
+  try {
+    localStorage.removeItem(LOCALSTORAGE_AUTH_SESSION_KEY);
+  } catch {
+    // ignore
+  }
+}
+
 async function waitForGis(): Promise<NonNullable<Window['google']>> {
   const existing = window.google;
   if (existing?.accounts?.oauth2) return existing;
@@ -67,12 +112,24 @@ export function AuthProvider({ children }: { children: ReactNode }): JSX.Element
     error: null,
   });
 
-  // In-memory only (per spec — no localStorage/sessionStorage for auth state).
+  // Persisted across reloads via localStorage (writes happen on every token
+  // update + sign-in, cleared on signOut). See writeStoredSession below.
   const tokenRef = useRef<string | null>(null);
   const tokenExpiresAtRef = useRef<number | null>(null);
+  const emailRef = useRef<string | null>(null);
   const tokenClientRef = useRef<GisTokenClient | null>(null);
   const pendingResolveRef = useRef<((token: string) => void) | null>(null);
   const pendingRejectRef = useRef<((err: Error) => void) | null>(null);
+
+  const persistCurrent = useCallback((): void => {
+    if (tokenRef.current && tokenExpiresAtRef.current && emailRef.current) {
+      writeStoredSession({
+        email: emailRef.current,
+        token: tokenRef.current,
+        expiresAt: tokenExpiresAtRef.current,
+      });
+    }
+  }, []);
 
   const initTokenClient = useCallback(async (): Promise<GisTokenClient> => {
     if (tokenClientRef.current) return tokenClientRef.current;
@@ -94,6 +151,7 @@ export function AuthProvider({ children }: { children: ReactNode }): JSX.Element
         }
         tokenRef.current = response.access_token;
         tokenExpiresAtRef.current = Date.now() + response.expires_in * 1000;
+        persistCurrent();
         pendingResolveRef.current?.(response.access_token);
         pendingResolveRef.current = null;
         pendingRejectRef.current = null;
@@ -107,7 +165,7 @@ export function AuthProvider({ children }: { children: ReactNode }): JSX.Element
     });
     tokenClientRef.current = client;
     return client;
-  }, []);
+  }, [persistCurrent]);
 
   const requestToken = useCallback(
     async (prompt: '' | 'consent'): Promise<string> => {
@@ -121,38 +179,44 @@ export function AuthProvider({ children }: { children: ReactNode }): JSX.Element
     [initTokenClient],
   );
 
+  const completeSignIn = useCallback(
+    async (token: string, expiresAt: number): Promise<void> => {
+      // Verify email allowlist via userinfo.
+      const userinfo = await fetchUserInfo(token);
+      const email = (userinfo.email ?? '').toLowerCase();
+      if (!ENV.allowedGoogleEmail) {
+        setState({
+          status: 'error',
+          email,
+          expiresAt,
+          error: 'VITE_ALLOWED_GOOGLE_EMAIL is not set in the build',
+        });
+        return;
+      }
+      if (email !== ENV.allowedGoogleEmail) {
+        if (window.google && tokenRef.current) {
+          window.google.accounts.oauth2.revoke(tokenRef.current, () => undefined);
+        }
+        tokenRef.current = null;
+        tokenExpiresAtRef.current = null;
+        emailRef.current = null;
+        clearStoredSession();
+        setState({ status: 'unauthorized', email, expiresAt: null, error: null });
+        return;
+      }
+      emailRef.current = email;
+      persistCurrent();
+      setState({ status: 'signed-in', email, expiresAt, error: null });
+    },
+    [persistCurrent],
+  );
+
   const signIn = useCallback((): void => {
     setState((prev) => ({ ...prev, status: 'signing-in', error: null }));
     void (async () => {
       try {
         const token = await requestToken('consent');
-        const userinfo = await fetchUserInfo(token);
-        const email = (userinfo.email ?? '').toLowerCase();
-        if (!ENV.allowedGoogleEmail) {
-          setState({
-            status: 'error',
-            email,
-            expiresAt: tokenExpiresAtRef.current,
-            error: 'VITE_ALLOWED_GOOGLE_EMAIL is not set in the build',
-          });
-          return;
-        }
-        if (email !== ENV.allowedGoogleEmail) {
-          // Revoke the token — user is not authorized.
-          if (window.google && tokenRef.current) {
-            window.google.accounts.oauth2.revoke(tokenRef.current, () => undefined);
-          }
-          tokenRef.current = null;
-          tokenExpiresAtRef.current = null;
-          setState({ status: 'unauthorized', email, expiresAt: null, error: null });
-          return;
-        }
-        setState({
-          status: 'signed-in',
-          email,
-          expiresAt: tokenExpiresAtRef.current,
-          error: null,
-        });
+        await completeSignIn(token, tokenExpiresAtRef.current ?? Date.now() + 3_600_000);
       } catch (err) {
         setState({
           status: 'error',
@@ -162,7 +226,7 @@ export function AuthProvider({ children }: { children: ReactNode }): JSX.Element
         });
       }
     })();
-  }, [requestToken]);
+  }, [requestToken, completeSignIn]);
 
   const signOut = useCallback((): void => {
     const token = tokenRef.current;
@@ -171,6 +235,8 @@ export function AuthProvider({ children }: { children: ReactNode }): JSX.Element
     }
     tokenRef.current = null;
     tokenExpiresAtRef.current = null;
+    emailRef.current = null;
+    clearStoredSession();
     setState({ status: 'signed-out', email: null, expiresAt: null, error: null });
   }, []);
 
@@ -181,20 +247,66 @@ export function AuthProvider({ children }: { children: ReactNode }): JSX.Element
       const stillValid =
         token !== null && expiresAt !== null && expiresAt - TOKEN_EXPIRY_BUFFER_MS > Date.now();
       if (!forceRefresh && stillValid) return token;
-      // Silent refresh — user already consented to the scope, no popup.
       const fresh = await requestToken('');
+      persistCurrent();
       setState((prev) => ({ ...prev, expiresAt: tokenExpiresAtRef.current }));
       return fresh;
     },
-    [requestToken],
+    [requestToken, persistCurrent],
   );
 
+  // Bootstrap: try to restore a previous session from localStorage. If still
+  // valid, land the user on the app directly (no GIS popup). If stale but we
+  // have the email, attempt silent refresh; Google may auto-renew without a
+  // popup if the user's Google session is still active.
   useEffect(() => {
-    // Don't attempt silent sign-in on load — user must explicitly click the
-    // sign-in button. Just mark bootstrapping done.
-    setState((prev) =>
-      prev.status === 'bootstrapping' ? { ...prev, status: 'signed-out' } : prev,
-    );
+    let cancelled = false;
+    void (async () => {
+      const stored = readStoredSession();
+      if (!stored) {
+        if (!cancelled) setState({ status: 'signed-out', email: null, expiresAt: null, error: null });
+        return;
+      }
+      const stillValid = stored.expiresAt - TOKEN_EXPIRY_BUFFER_MS > Date.now();
+      if (stillValid) {
+        tokenRef.current = stored.token;
+        tokenExpiresAtRef.current = stored.expiresAt;
+        emailRef.current = stored.email;
+        try {
+          // Validate against userinfo — also confirms allowlist + token not revoked.
+          await completeSignIn(stored.token, stored.expiresAt);
+        } catch {
+          // Token was stale or revoked on the server side — drop session and fall
+          // through to silent refresh.
+          tokenRef.current = null;
+          tokenExpiresAtRef.current = null;
+          clearStoredSession();
+          if (!cancelled) setState({ status: 'signed-out', email: null, expiresAt: null, error: null });
+        }
+        return;
+      }
+      // Token expired — try silent refresh. If Google's session is warm this
+      // finishes without a popup; otherwise the callback fires with an error
+      // and we drop the user onto the sign-in screen.
+      emailRef.current = stored.email;
+      try {
+        const fresh = await requestToken('');
+        if (cancelled) return;
+        await completeSignIn(fresh, tokenExpiresAtRef.current ?? Date.now() + 3_600_000);
+      } catch {
+        if (cancelled) return;
+        tokenRef.current = null;
+        tokenExpiresAtRef.current = null;
+        emailRef.current = null;
+        clearStoredSession();
+        setState({ status: 'signed-out', email: null, expiresAt: null, error: null });
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // Only on mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const value = useMemo<AuthContextValue>(
