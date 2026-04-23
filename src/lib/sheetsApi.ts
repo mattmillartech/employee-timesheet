@@ -1,4 +1,5 @@
 import {
+  ALL_SLOTS_TAB_NAME,
   CONFIG_RANGE,
   CONFIG_TAB_NAME,
   DASHBOARD_TAB_NAME,
@@ -543,184 +544,234 @@ async function listSheetProperties(
 }
 
 /**
- * Idempotent: ensures a `Dashboard` tab exists at index 0, then rewrites its
- * contents with live formulas showing each active employee's current-week
- * schedule. Per-cell output looks like "07:00 → 15:00\n8.0h" (via CHAR(10)).
+ * Idempotent: ensures the `Dashboard` tab sits at index 0 with a native
+ * Google Sheets Pivot Table that users can reconfigure live to switch between
+ * views (all-employees vs one-employee, daily vs weekly vs monthly vs yearly
+ * vs all-time). The pivot sources from a hidden `_AllSlots` tab that
+ * consolidates every employee's rows with an Employee column tacked on via
+ * a single stacking formula.
  *
- * Call this on first Dashboard page load or whenever the employee list changes.
+ * Call this on first Dashboard-page load or whenever the employee list
+ * changes — the stacking formula references each active employee's tab by
+ * name, so it has to be rewritten when the roster changes.
  */
 export async function initOrRebuildDashboardTab(
   sheetId: string,
   employees: readonly Employee[],
   token: string,
 ): Promise<void> {
-  const props = await listSheetProperties(sheetId, token);
-  const existing = props.sheets?.find((s) => s.properties?.title === DASHBOARD_TAB_NAME);
-  let dashboardSheetId = existing?.properties?.sheetId;
+  const active = employees
+    .filter((e) => e.active)
+    .sort((a, b) => a.sortOrder - b.sortOrder);
 
-  const requests: unknown[] = [];
+  // --- Phase 1: ensure Dashboard (index 0, visible) and _AllSlots (hidden)
+  //              exist and are cleared of any prior content / pivots.
+  let props = await listSheetProperties(sheetId, token);
+  let dashboardSheetId = props.sheets?.find((s) => s.properties?.title === DASHBOARD_TAB_NAME)?.properties?.sheetId;
+  let allSlotsSheetId = props.sheets?.find((s) => s.properties?.title === ALL_SLOTS_TAB_NAME)?.properties?.sheetId;
 
+  const phase1: unknown[] = [];
   if (dashboardSheetId === undefined) {
-    requests.push({
+    phase1.push({
       addSheet: {
         properties: {
           title: DASHBOARD_TAB_NAME,
           index: 0,
-          gridProperties: { rowCount: 60, columnCount: 12, frozenRowCount: 6 },
+          gridProperties: { rowCount: 200, columnCount: 20, frozenRowCount: 6 },
         },
       },
     });
   } else {
-    // Move to index 0 and clear any stale content beyond row 1.
-    requests.push({
+    phase1.push({
       updateSheetProperties: {
-        properties: { sheetId: dashboardSheetId, index: 0 },
-        fields: 'index',
+        properties: { sheetId: dashboardSheetId, index: 0, hidden: false },
+        fields: 'index,hidden',
       },
     });
-    requests.push({
+    phase1.push({
       updateCells: {
         range: { sheetId: dashboardSheetId },
+        fields: 'userEnteredValue,userEnteredFormat,pivotTable',
+      },
+    });
+  }
+  if (allSlotsSheetId === undefined) {
+    phase1.push({
+      addSheet: {
+        properties: {
+          title: ALL_SLOTS_TAB_NAME,
+          hidden: true,
+          gridProperties: { rowCount: 5000, columnCount: 10 },
+        },
+      },
+    });
+  } else {
+    phase1.push({
+      updateSheetProperties: {
+        properties: { sheetId: allSlotsSheetId, hidden: true },
+        fields: 'hidden',
+      },
+    });
+    phase1.push({
+      updateCells: {
+        range: { sheetId: allSlotsSheetId },
         fields: 'userEnteredValue,userEnteredFormat',
       },
     });
   }
 
-  if (requests.length > 0) {
-    const batchUrl = `${SHEETS_API_BASE}/${sheetId}:batchUpdate`;
-    const result = await sheetsFetch<{
-      replies?: Array<{ addSheet?: { properties?: { sheetId?: number } } }>;
-    }>(batchUrl, token, {
+  if (phase1.length > 0) {
+    const res = await sheetsFetch<{
+      replies?: Array<{ addSheet?: { properties?: { title?: string; sheetId?: number } } }>;
+    }>(`${SHEETS_API_BASE}/${sheetId}:batchUpdate`, token, {
       method: 'POST',
-      body: JSON.stringify({ requests }),
+      body: JSON.stringify({ requests: phase1 }),
     });
-    // If we just added the sheet, pick up its new sheetId for later use.
-    const added = result.replies?.find((r) => r.addSheet)?.addSheet?.properties?.sheetId;
-    if (added !== undefined) dashboardSheetId = added;
+    for (const r of res.replies ?? []) {
+      const p = r.addSheet?.properties;
+      if (p?.title === DASHBOARD_TAB_NAME && p.sheetId !== undefined) dashboardSheetId = p.sheetId;
+      if (p?.title === ALL_SLOTS_TAB_NAME && p.sheetId !== undefined) allSlotsSheetId = p.sheetId;
+    }
   }
 
-  const active = employees
-    .filter((e) => e.active)
-    .sort((a, b) => a.sortOrder - b.sortOrder);
+  // We need both IDs from here on out.
+  if (dashboardSheetId === undefined || allSlotsSheetId === undefined) {
+    props = await listSheetProperties(sheetId, token);
+    dashboardSheetId = props.sheets?.find((s) => s.properties?.title === DASHBOARD_TAB_NAME)?.properties?.sheetId;
+    allSlotsSheetId = props.sheets?.find((s) => s.properties?.title === ALL_SLOTS_TAB_NAME)?.properties?.sheetId;
+  }
+  if (dashboardSheetId === undefined || allSlotsSheetId === undefined) {
+    throw new SheetsApiError(500, 'Failed to resolve Dashboard / _AllSlots sheet IDs');
+  }
 
-  const values = buildDashboardRows(active);
-  const endCol = columnLetter(values[0]?.length ?? 1);
-  const endRow = values.length;
+  // --- Phase 2: write cell values via values.batchUpdate (header rows,
+  //              intro copy, stacking formula). Pivot creation happens in
+  //              phase 3 via spreadsheets.batchUpdate because it needs the
+  //              richer UpdateCellsRequest shape.
+  const dashboardHeader: string[][] = [
+    ['Employee Timesheet — Dashboard'],
+    [],
+    [
+      'Click anywhere in the pivot below, then use the pivot editor panel on the right to switch views.',
+    ],
+    [
+      'Typical reconfigurations: drag Employee to the "Filters" pane to scope to one person, change the',
+    ],
+    [
+      'Date grouping between Day / Week / Month / Year via the "Group by" dropdown, or add SlotType as a',
+    ],
+    ['Filter to see only "work" vs "break" time.'],
+  ];
+
+  const allSlotsRows = buildAllSlotsSheetValues(active);
 
   await batchUpdateValues(
     sheetId,
     [
-      {
-        range: `${DASHBOARD_TAB_NAME}!A1:${endCol}${endRow}`,
-        values,
-      },
+      { range: `${DASHBOARD_TAB_NAME}!A1:A6`, values: dashboardHeader },
+      { range: `${ALL_SLOTS_TAB_NAME}!A1:H1`, values: [[...ALL_SLOTS_HEADERS]] },
+      ...(allSlotsRows
+        ? [{ range: `${ALL_SLOTS_TAB_NAME}!A2:A2`, values: [[allSlotsRows]] as string[][] }]
+        : []),
     ],
     token,
   );
+
+  // --- Phase 3: drop a pivot table onto Dashboard!A8 sourcing from _AllSlots.
+  //              Default view: rows = Employee + Date(grouped by week),
+  //              values = SUM(Hours), columns = (none), filters = (none).
+  //              User can reconfigure in-place via the pivot editor.
+  const pivotRequest = {
+    updateCells: {
+      rows: [
+        {
+          values: [
+            {
+              pivotTable: {
+                source: {
+                  sheetId: allSlotsSheetId,
+                  startRowIndex: 0,
+                  startColumnIndex: 0,
+                  endColumnIndex: 8,
+                },
+                rows: [
+                  {
+                    sourceColumnOffset: 0,
+                    showTotals: true,
+                    sortOrder: 'ASCENDING',
+                    label: 'Employee',
+                  },
+                  {
+                    sourceColumnOffset: 1,
+                    showTotals: false,
+                    sortOrder: 'ASCENDING',
+                    label: 'Date',
+                    groupRule: {
+                      dateTimeRule: { type: 'ISO_YEAR_WEEK' },
+                    },
+                  },
+                ],
+                values: [
+                  {
+                    sourceColumnOffset: 6,
+                    summarizeFunction: 'SUM',
+                    name: 'Hours',
+                  },
+                ],
+                valueLayout: 'HORIZONTAL',
+              },
+            },
+          ],
+        },
+      ],
+      start: { sheetId: dashboardSheetId, rowIndex: 7, columnIndex: 0 },
+      fields: 'pivotTable',
+    },
+  };
+
+  await sheetsFetch(`${SHEETS_API_BASE}/${sheetId}:batchUpdate`, token, {
+    method: 'POST',
+    body: JSON.stringify({ requests: [pivotRequest] }),
+  });
 }
 
-function columnLetter(n: number): string {
-  let s = '';
-  let x = n;
-  while (x > 0) {
-    const r = (x - 1) % 26;
-    s = String.fromCharCode(65 + r) + s;
-    x = Math.floor((x - 1) / 26);
-  }
-  return s || 'A';
-}
+const ALL_SLOTS_HEADERS = [
+  'Employee',
+  'Date',
+  'Day',
+  'SlotType',
+  'Start',
+  'End',
+  'Hours',
+  'Notes',
+] as const;
 
-function buildDashboardRows(activeEmployees: readonly Employee[]): string[][] {
-  const rows: string[][] = [];
-  // Row 1: title
-  rows.push(['Employee Timesheet — Dashboard', '', '', '', '', '', '', '', '']);
-  // Row 2: blank
-  rows.push(['', '', '', '', '', '', '', '', '']);
-  // Row 3: Week label
-  rows.push([
-    'Week',
-    '=TEXT($B$5, "MMM d")&" – "&TEXT($B$5+6, "MMM d, yyyy")',
-    '',
-    '',
-    '',
-    '',
-    '',
-    '',
-    '',
-  ]);
-  // Row 4: blank
-  rows.push(['', '', '', '', '', '', '', '', '']);
-  // Row 5: reference Sunday — editable by user to change the viewed week
-  rows.push([
-    'Week starts (Sunday)',
-    '=TODAY() - WEEKDAY(TODAY(),1)+1',
-    '',
-    '',
-    '',
-    '',
-    '',
-    '',
-    '',
-  ]);
-  // Row 6: column headers
-  rows.push([
-    'Employee',
-    '=TEXT($B$5+0, "ddd\nMMM d")',
-    '=TEXT($B$5+1, "ddd\nMMM d")',
-    '=TEXT($B$5+2, "ddd\nMMM d")',
-    '=TEXT($B$5+3, "ddd\nMMM d")',
-    '=TEXT($B$5+4, "ddd\nMMM d")',
-    '=TEXT($B$5+5, "ddd\nMMM d")',
-    '=TEXT($B$5+6, "ddd\nMMM d")',
-    'TOTAL',
-  ]);
-
-  // Per-employee rows
-  for (const e of activeEmployees) {
-    const tabRef = sheetRef(e.tabName);
-    const cellFormula = (dayOffset: number): string => {
-      const dayExpr = `$B$5+${dayOffset}`;
+/**
+ * Build a single monster formula for `_AllSlots!A2` that vertically stacks
+ * each active employee's rows with an Employee column prepended, and filters
+ * out placeholder rows that come from empty tabs.
+ *
+ * The QUERY wrapper at the outermost level strips rows where Col1 is blank,
+ * which is what the IFERROR fallback per employee produces for an empty tab.
+ */
+function buildAllSlotsSheetValues(activeEmployees: readonly Employee[]): string | null {
+  if (activeEmployees.length === 0) return null;
+  const blocks = activeEmployees
+    .map((e) => {
+      const ref = sheetRef(e.tabName);
+      const name = e.tabName.replace(/"/g, '""');
+      // Per-employee block: { [EmployeeColumn], [tab A2:G] }.
+      // IFERROR to a single-row 8-col placeholder if the tab is empty.
       return (
-        `=IFERROR(IF(SUMIFS(${tabRef}!F:F, ${tabRef}!A:A, ${dayExpr})=0, "—", ` +
-        `TEXT(MINIFS(${tabRef}!D:D, ${tabRef}!A:A, ${dayExpr}, ${tabRef}!C:C, "work"), "HH:mm") ` +
-        `&" → "&TEXT(MAXIFS(${tabRef}!E:E, ${tabRef}!A:A, ${dayExpr}, ${tabRef}!C:C, "work"), "HH:mm") ` +
-        `&CHAR(10)&TEXT(SUMIFS(${tabRef}!F:F, ${tabRef}!A:A, ${dayExpr}), "0.0")&"h"), "—")`
+        `IFERROR(ARRAYFORMULA({IF(${ref}!A2:A<>"", "${name}", ""), ${ref}!A2:G}), ` +
+        `{"","","","","","","",""})`
       );
-    };
-    const weekTotalFormula =
-      `=IFERROR(SUMIFS(${tabRef}!F:F, ${tabRef}!A:A, ">="&$B$5, ${tabRef}!A:A, "<="&$B$5+6), 0)`;
-    rows.push([
-      e.displayName,
-      cellFormula(0),
-      cellFormula(1),
-      cellFormula(2),
-      cellFormula(3),
-      cellFormula(4),
-      cellFormula(5),
-      cellFormula(6),
-      weekTotalFormula,
-    ]);
-  }
-
-  // Column totals row
-  const lastDataRow = 6 + activeEmployees.length;
-  const colTotal = (col: string): string =>
-    activeEmployees.length === 0
-      ? ''
-      : `=SUM(${col}7:${col}${lastDataRow})`;
-  rows.push([
-    'TOTAL',
-    colTotal('B'),
-    colTotal('C'),
-    colTotal('D'),
-    colTotal('E'),
-    colTotal('F'),
-    colTotal('G'),
-    colTotal('H'),
-    colTotal('I'),
-  ]);
-
-  return rows;
+    })
+    .join(';');
+  return (
+    `=IFERROR(QUERY({${blocks}}, "SELECT * WHERE Col1 <> '' AND Col1 IS NOT NULL", 0), ` +
+    `{"","","","","","","",""})`
+  );
 }
 
 function sheetRef(tabName: string): string {
