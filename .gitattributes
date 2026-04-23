@@ -1,0 +1,17 @@
+* text=auto eol=lf
+
+# Binary files — no EOL conversion
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.svg text eol=lf
+*.pdf binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.eot binary
+
+# Scripts must be LF (shebang breaks with CRLF)
+*.sh text eol=lf

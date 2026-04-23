@@ -1,0 +1,29 @@
+# Dual-purpose compose: local dev exposes 3000:80; production deploy on Redpill
+# joins the external `npm_proxy` network instead (NPM reaches the container
+# by name on port 80). Use `docker-compose.override.yml` (gitignored) to
+# drop the external network on pure-local dev machines.
+
+services:
+  timesheet:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        VITE_GOOGLE_CLIENT_ID: ${VITE_GOOGLE_CLIENT_ID:-}
+        VITE_ALLOWED_GOOGLE_EMAIL: ${VITE_ALLOWED_GOOGLE_EMAIL:-}
+        VITE_SHEET_ID: ${VITE_SHEET_ID:-}
+    container_name: timesheet
+    restart: unless-stopped
+    environment:
+      GOOGLE_SERVICE_ACCOUNT_JSON: ${GOOGLE_SERVICE_ACCOUNT_JSON:-}
+      AGENT_API_KEY: ${AGENT_API_KEY:-}
+    ports:
+      - "3000:80"
+    networks:
+      - npm_proxy
+    labels:
+      - "watchdog=true"
+
+networks:
+  npm_proxy:
+    external: true
