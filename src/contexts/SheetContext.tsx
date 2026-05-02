@@ -3,6 +3,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useRef,
   useMemo,
   useState,
   type ReactNode,
@@ -24,7 +25,7 @@ import {
   getEmployees,
   writeAppSetting,
 } from '@/lib/sheetsApi';
-import { listAppTimesheets } from '@/lib/driveApi';
+import { listAppTimesheets, readAppPrefs, writeAppPrefs } from '@/lib/driveApi';
 import type { AppSettings, DisplayMode, Employee } from '@/types';
 
 type Status = 'idle' | 'loading' | 'provisioning' | 'ready' | 'error';
@@ -62,15 +63,11 @@ function lsSet(key: string, value: string): void {
 }
 
 /**
- * Resolve the sheet ID to use for a given signed-in email.
- * Priority:
- *   1. Per-email localStorage — `hoursTrackerSheetId:<email>`
- *   2. Legacy global localStorage — `hoursTrackerSheetId` (preserves
- *      pre-multi-user deployments where one sheet was shared)
- *   3. Build-time `VITE_SHEET_ID` env var (same migration safety net)
- *   4. null → caller provisions a fresh sheet
+ * Per-browser fallback chain for the sheet ID, used ONLY when the Drive
+ * prefs file (the per-account source of truth) hasn't been created yet.
+ * Once the prefs file exists, it overrides everything here.
  */
-function resolveSheetId(email: string | null): string {
+function resolveLocalFallback(email: string | null): string {
   if (email) {
     const perUser = lsGet(`${LOCALSTORAGE_SHEET_ID_PREFIX}${email.toLowerCase()}`);
     if (perUser) return perUser;
@@ -91,7 +88,7 @@ export function SheetProvider({ children }: { children: ReactNode }): JSX.Elemen
   const { status: authStatus, email } = useAuth();
   const run = useSheetRunner();
 
-  const [sheetId, setSheetIdState] = useState<string>(() => resolveSheetId(null));
+  const [sheetId, setSheetIdState] = useState<string>(() => resolveLocalFallback(null));
   const [status, setStatus] = useState<Status>('idle');
   const [error, setError] = useState<string | null>(null);
   const [employees, setEmployees] = useState<Employee[]>([]);
@@ -99,6 +96,10 @@ export function SheetProvider({ children }: { children: ReactNode }): JSX.Elemen
     timezone: DEFAULT_TIMEZONE,
     displayMode: DEFAULT_DISPLAY_MODE,
   });
+  // Drive prefs file ID — captured on bootstrap so subsequent setSheetId
+  // calls PATCH the same file instead of creating a duplicate. Refs are
+  // fine here because callers never need to react to the value changing.
+  const prefsFileIdRef = useRef<string | null>(null);
 
   const setSheetId = useCallback(
     (id: string) => {
@@ -108,8 +109,19 @@ export function SheetProvider({ children }: { children: ReactNode }): JSX.Elemen
       } else {
         lsSet(LOCALSTORAGE_SHEET_ID_KEY, id);
       }
+      // Push to Drive prefs in the background so the OTHER browsers signed
+      // in to this same Google account converge on this sheet too. Ignore
+      // failure — local browser still uses the new id; the next bootstrap
+      // on this machine will re-sync from Drive.
+      void run((t) => writeAppPrefs(t, { sheetId: id }, prefsFileIdRef.current ?? undefined))
+        .then((fileId) => {
+          prefsFileIdRef.current = fileId;
+        })
+        .catch((err) => {
+          console.warn('[sheet-context] writeAppPrefs failed; sheet choice will not sync across devices yet', err);
+        });
     },
-    [email],
+    [email, run],
   );
 
   const refreshEmployees = useCallback(async (): Promise<void> => {
@@ -157,45 +169,103 @@ export function SheetProvider({ children }: { children: ReactNode }): JSX.Elemen
     return newId;
   }, [provisionNewSheet]);
 
-  // On sign-in, (re)resolve the sheet id for the current user. Discovery
-  // order:
-  //   1. Per-email localStorage (preserves prior choice on this device)
-  //   2. Legacy global localStorage + VITE_SHEET_ID env (backward compat)
-  //   3. Drive API `drive.file`-scoped search for app-created sheets
-  //      (cross-device — same OAuth client sees the same created-file set)
-  //   4. Auto-provision a fresh sheet in the user's Drive
+  // On sign-in, resolve the sheet id for the current account. Drive prefs
+  // are authoritative — the same file lives in the user's Drive and is
+  // visible to every browser signed in to that account, so two devices on
+  // the same Google login can never disagree about which sheet to use.
+  //
+  // Discovery order:
+  //   1. Drive prefs file (per-account, cross-device)              ← truth
+  //   2. Local fallback (per-email + legacy localStorage + VITE_SHEET_ID)
+  //      — used only on first ever sign-in, then immediately written up
+  //      to Drive so step 1 takes over from there on
+  //   3. Drive search for any app-created spreadsheet (drive.file scope)
+  //   4. Auto-provision a fresh sheet
+  // After 2/3/4 we always write the chosen id to Drive prefs so the next
+  // sign-in (here or on any other device) hits step 1 directly.
   useEffect(() => {
     if (authStatus !== 'signed-in') {
       setStatus('idle');
       setEmployees([]);
+      prefsFileIdRef.current = null;
       return;
     }
-    const resolved = resolveSheetId(email);
-    if (resolved) {
-      setSheetIdState(resolved);
-      void loadAll();
-      return;
-    }
-    if (!email) return;
-    // Try Drive search first — if the user created a sheet via this app on
-    // another device, it shows up here and we reuse it.
+    let cancelled = false;
     void (async () => {
-      setStatus('provisioning');
+      setStatus('loading');
       setError(null);
       try {
-        const discovered = await run((t) => listAppTimesheets(t));
-        if (discovered.length > 0) {
-          // Use the oldest app-created sheet as canonical. Race-safe:
-          // two devices signing in concurrently create duplicates; next
-          // sign-in picks the oldest (first-written-wins).
-          const chosen = discovered[0];
-          if (!chosen) throw new Error('Drive search returned an empty entry');
-          persistSheetIdForUser(email, chosen.id);
-          setSheetIdState(chosen.id);
+        // (1) Drive prefs — authoritative source of truth across devices.
+        const prefsResult = await run((t) => readAppPrefs(t));
+        if (cancelled) return;
+        if (prefsResult?.prefs.sheetId) {
+          prefsFileIdRef.current = prefsResult.fileId;
+          setSheetIdState(prefsResult.prefs.sheetId);
+          if (email) persistSheetIdForUser(email, prefsResult.prefs.sheetId);
+          // loadAll runs via the [sheetId, authStatus] effect below.
           return;
         }
-        await provisionNewSheet();
+        // No prefs file yet (first ever sign-in for this account, OR an
+        // upgrade from the old localStorage-only world). Pick something
+        // and persist it to Drive so future loads converge.
+        if (prefsResult) {
+          // Empty prefs file already exists — keep its id so we PATCH it.
+          prefsFileIdRef.current = prefsResult.fileId;
+        }
+
+        // (2) Local fallback chain.
+        const fallback = resolveLocalFallback(email);
+        if (fallback) {
+          if (cancelled) return;
+          setSheetIdState(fallback);
+          if (email) persistSheetIdForUser(email, fallback);
+          // Best-effort persist to Drive — don't block the user on this.
+          try {
+            const fileId = await run((t) =>
+              writeAppPrefs(t, { sheetId: fallback }, prefsFileIdRef.current ?? undefined),
+            );
+            if (!cancelled) prefsFileIdRef.current = fileId;
+          } catch (err) {
+            console.warn('[sheet-context] initial writeAppPrefs failed', err);
+          }
+          return;
+        }
+
+        if (!email) return;
+
+        // (3) Drive search for app-created sheets.
+        setStatus('provisioning');
+        const discovered = await run((t) => listAppTimesheets(t));
+        if (cancelled) return;
+        if (discovered.length > 0) {
+          const chosen = discovered[0];
+          if (!chosen) throw new Error('Drive search returned an empty entry');
+          setSheetIdState(chosen.id);
+          persistSheetIdForUser(email, chosen.id);
+          try {
+            const fileId = await run((t) =>
+              writeAppPrefs(t, { sheetId: chosen.id }, prefsFileIdRef.current ?? undefined),
+            );
+            if (!cancelled) prefsFileIdRef.current = fileId;
+          } catch (err) {
+            console.warn('[sheet-context] initial writeAppPrefs failed', err);
+          }
+          return;
+        }
+
+        // (4) Auto-provision a fresh sheet.
+        const newId = await provisionNewSheet();
+        if (cancelled) return;
+        try {
+          const fileId = await run((t) =>
+            writeAppPrefs(t, { sheetId: newId }, prefsFileIdRef.current ?? undefined),
+          );
+          if (!cancelled) prefsFileIdRef.current = fileId;
+        } catch (err) {
+          console.warn('[sheet-context] writeAppPrefs after provision failed', err);
+        }
       } catch (err) {
+        if (cancelled) return;
         setStatus('error');
         setError(
           err instanceof Error
@@ -204,6 +274,9 @@ export function SheetProvider({ children }: { children: ReactNode }): JSX.Elemen
         );
       }
     })();
+    return () => {
+      cancelled = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authStatus, email]);
 
