@@ -301,15 +301,21 @@ export function EntryPage(): JSX.Element {
 
   const persistSlot = useCallback(
     async (slot: Slot): Promise<void> => {
-      // Only persist once we have a complete start + end pair.
-      if (!isValidHHMM(slot.start) || !isValidHHMM(slot.end)) return;
+      const startOk = isValidHHMM(slot.start);
+      const endOk = isValidHHMM(slot.end);
+      // New rows (no rowIndex yet) wait for a complete start + end pair before
+      // appending. Existing rows always write through, even if one field is
+      // still malformed — otherwise a row that landed in the sheet with a
+      // non-padded time (e.g. "0:00", "2:15", "9:30") becomes un-fixable from
+      // the UI: you can't repair End while Start is invalid, and vice versa.
+      if (slot.rowIndex === undefined && (!startOk || !endOk)) return;
       markPending(slot.slotId, { saving: true, error: null });
       const row = slotToRowDerived({
         date: slot.date,
         slotType: slot.slotType,
         start: slot.start,
         end: slot.end,
-        hours: calculateHours(slot.start, slot.end, slot.slotType),
+        hours: startOk && endOk ? calculateHours(slot.start, slot.end, slot.slotType) : 0,
         notes: slot.notes,
       });
       try {
@@ -351,27 +357,40 @@ export function EntryPage(): JSX.Element {
   );
 
   const handleSlotDelete = useCallback(
-    (slotId: string): void => {
-      let snapshot: Slot | undefined;
+    async (slotId: string): Promise<void> => {
+      // Resolve the target from current state (NOT inside setSlots) so we
+      // don't optimistically remove before the API confirms — otherwise a
+      // user who deletes-then-navigates can race the in-flight clear: Entry
+      // remounts, reload() re-pulls from the sheet before clearRow has hit,
+      // and the row reappears.
+      let target: Slot | undefined;
       setSlots((prev) => {
-        snapshot = prev.find((s) => s.slotId === slotId);
-        return prev.filter((s) => s.slotId !== slotId);
+        target = prev.find((s) => s.slotId === slotId);
+        return prev;
       });
-      const target = snapshot;
       if (!target) return;
-      clearPending(slotId);
-      if (target.rowIndex !== undefined) {
-        void run((t) => clearRow(sheetId, selectedTab, target.rowIndex as number, t)).catch(
-          (err) => {
-            toast.error(
-              `Delete failed — restoring row: ${err instanceof Error ? err.message : String(err)}`,
-            );
-            setSlots((prev) => [...prev, target]);
-          },
-        );
+      if (target.rowIndex === undefined) {
+        // Local-only placeholder, never persisted. Drop it immediately.
+        setSlots((prev) => prev.filter((s) => s.slotId !== slotId));
+        clearPending(slotId);
+        return;
+      }
+      const rowIndex = target.rowIndex;
+      markPending(slotId, { saving: true, error: null });
+      try {
+        await run((t) => clearRow(sheetId, selectedTab, rowIndex, t));
+        // Reload so local state matches the sheet — any concurrent edit /
+        // duplicate row drift gets flushed here, and there's no window where
+        // a stale row can resurface on the next page mount.
+        await reload();
+        clearPending(slotId);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        markPending(slotId, { saving: false, error: msg });
+        toast.error(`Delete failed: ${msg}`);
       }
     },
-    [run, sheetId, selectedTab],
+    [run, sheetId, selectedTab, reload],
   );
 
   const handleAddSlot = useCallback(

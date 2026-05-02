@@ -75,6 +75,40 @@ export function normalizeTimeInput(raw: string): string | null {
   return null;
 }
 
+/**
+ * Tolerant parser for time strings *read back* from the sheet.
+ *
+ * Sheets API `valueInputOption=USER_ENTERED` parses any string that looks
+ * like a time (e.g. "07:00") into a serial-number time value, which then
+ * round-trips back via the cell's number format as "0:00", "9:30",
+ * "7:00 AM", "2:15 PM", etc. — none of which pass `isValidHHMM`. Writes now
+ * force text storage (apostrophe-prefixed in `slotToRow*`), but legacy rows
+ * already in the sheet still need to load cleanly.
+ *
+ * Returns canonical zero-padded "HH:MM" if recognizable, else the original
+ * string so the user can still see + correct it.
+ */
+export function normalizeStoredTime(s: string): string {
+  if (!s) return '';
+  if (isValidHHMM(s)) return s;
+  const m = /^\s*(\d{1,2}):(\d{2})(?:\s*([AaPp])\.?[Mm]?\.?)?\s*$/.exec(s);
+  if (!m) return s;
+  let h = Number(m[1]);
+  const mm = Number(m[2]);
+  if (mm > 59) return s;
+  const period = m[3]?.toUpperCase();
+  if (period === 'A') {
+    if (h < 1 || h > 12) return s;
+    if (h === 12) h = 0;
+  } else if (period === 'P') {
+    if (h < 1 || h > 12) return s;
+    if (h !== 12) h += 12;
+  } else if (h > 23) {
+    return s;
+  }
+  return `${String(h).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
+}
+
 export function formatHours(h: number): string {
   const rounded = Math.round(h * 100) / 100;
   return rounded.toFixed(2);

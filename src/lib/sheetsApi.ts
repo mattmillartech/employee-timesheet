@@ -16,7 +16,7 @@ import {
 } from './constants';
 import type { AppSettings, DisplayMode, Employee, GoogleUserInfo, RawRow, Slot, SlotType } from '@/types';
 import { dayAbbrev, parseISODate, toISODate } from './dateUtils';
-import { calculateHours, isValidHHMM } from './timeUtils';
+import { calculateHours, isValidHHMM, normalizeStoredTime } from './timeUtils';
 
 export class SheetsApiError extends Error {
   public readonly status: number;
@@ -379,8 +379,11 @@ function rowToSlot(row: RawRow, rowIndex: number): Slot | null {
   if (!date) return null;
   if (!parseISODate(date)) return null;
   const slotType: SlotType = slotTypeRaw === 'break' ? 'break' : 'work';
-  const startStr = start ?? '';
-  const endStr = end ?? '';
+  // normalizeStoredTime repairs the round-trip damage from prior
+  // USER_ENTERED writes (e.g. "0:00" → "00:00", "2:15 PM" → "14:15") so
+  // legacy rows render and validate the same as freshly-written ones.
+  const startStr = normalizeStoredTime(start ?? '');
+  const endStr = normalizeStoredTime(end ?? '');
   const storedHours = Number.parseFloat(String(hoursRaw ?? '0'));
   const hours =
     Number.isFinite(storedHours) && storedHours !== 0
@@ -401,13 +404,27 @@ function rowToSlot(row: RawRow, rowIndex: number): Slot | null {
   };
 }
 
+/**
+ * Force Sheets to store the value as text via the apostrophe prefix instead
+ * of parsing it as a time-of-day serial. We use `valueInputOption=USER_ENTERED`
+ * so date (col A) and hours (col F) still get parsed as their natural types,
+ * but a bare "07:00" in start/end gets coerced into a serial number that
+ * round-trips back through the cell's number format as "0:00", "7:00 AM",
+ * etc. — none of which match `isValidHHMM`. Apostrophe-prefix scopes the
+ * "store as text" behavior to just the time columns without affecting the
+ * date / hours parsing.
+ */
+function asSheetText(s: string): string {
+  return s ? `'${s}` : '';
+}
+
 export function slotToRow(slot: Slot): ReadonlyArray<string | number> {
   return [
     slot.date,
     slot.day,
     slot.slotType,
-    slot.start,
-    slot.end,
+    asSheetText(slot.start),
+    asSheetText(slot.end),
     slot.hours,
     slot.notes,
   ];
@@ -417,7 +434,15 @@ export function slotToRow(slot: Slot): ReadonlyArray<string | number> {
 export function slotToRowDerived(slot: Omit<Slot, 'slotId' | 'rowIndex' | 'day'>): ReadonlyArray<string | number> {
   const d = parseISODate(slot.date);
   const day = d ? dayAbbrev(d) : '';
-  return [slot.date, day, slot.slotType, slot.start, slot.end, slot.hours, slot.notes];
+  return [
+    slot.date,
+    day,
+    slot.slotType,
+    asSheetText(slot.start),
+    asSheetText(slot.end),
+    slot.hours,
+    slot.notes,
+  ];
 }
 
 // ============================================================
