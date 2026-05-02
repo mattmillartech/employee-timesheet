@@ -79,6 +79,49 @@ async function tabExists(sheetId, tabName, token) {
   return (data.sheets ?? []).some((s) => s.properties?.title === tabName);
 }
 
+async function getNumericSheetId(sheetId, tabName, token) {
+  const url = `${SHEETS_API_BASE}/${sheetId}?fields=sheets(properties(sheetId,title))`;
+  const data = await sheetsFetch(url, token);
+  const sheet = (data.sheets ?? []).find((s) => s.properties?.title === tabName);
+  if (sheet?.properties?.sheetId === undefined) {
+    throw new SheetsError(404, `Tab not found: ${tabName}`);
+  }
+  return sheet.properties.sheetId;
+}
+
+// Apostrophe-prefix forces Sheets to store the cell as text. We need this for
+// start/end specifically — without it, USER_ENTERED parses "07:00" as a time
+// serial and the cell's number format re-renders it on read as "0:00",
+// "7:00 AM", etc. (none of which match the canonical HH:MM regex). Date and
+// hours columns SHOULD parse, so we don't apostrophe those.
+function asSheetText(s) {
+  return s ? `'${s}` : '';
+}
+
+// Tolerant reverse of asSheetText for legacy rows already mangled by the
+// USER_ENTERED round-trip — accepts H:MM, HH:MM, H:MM AM/PM, etc., maps to
+// canonical 24-hour HH:MM. Pass-through if unrecognized.
+function normalizeStoredTime(s) {
+  if (!s) return '';
+  if (/^([01]\d|2[0-3]):([0-5]\d)$/.test(s)) return s;
+  const m = /^\s*(\d{1,2}):(\d{2})(?:\s*([AaPp])\.?[Mm]?\.?)?\s*$/.exec(s);
+  if (!m) return s;
+  let h = Number(m[1]);
+  const mm = Number(m[2]);
+  if (mm > 59) return s;
+  const period = m[3]?.toUpperCase();
+  if (period === 'A') {
+    if (h < 1 || h > 12) return s;
+    if (h === 12) h = 0;
+  } else if (period === 'P') {
+    if (h < 1 || h > 12) return s;
+    if (h !== 12) h += 12;
+  } else if (h > 23) {
+    return s;
+  }
+  return `${String(h).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
+}
+
 async function getValues(sheetId, tabName, range, token) {
   const url = `${SHEETS_API_BASE}/${sheetId}/values/${encodeRange(tabName, range)}`;
   const data = await sheetsFetch(url, token);
@@ -115,8 +158,8 @@ export async function readSlots(sheetId, tabName, token) {
       date: row[0],
       day: row[1] ?? dayAbbrevForISO(row[0]),
       slotType: row[2] === 'break' ? 'break' : 'work',
-      start: row[3] ?? '',
-      end: row[4] ?? '',
+      start: normalizeStoredTime(row[3] ?? ''),
+      end: normalizeStoredTime(row[4] ?? ''),
       hours: Number.parseFloat(row[5] ?? '0') || 0,
       notes: row[6] ?? '',
     });
@@ -162,7 +205,15 @@ export async function upsertSlots(sheetId, tabName, slots, token) {
   const appends = [];
   for (const s of slots) {
     const day = s.day || dayAbbrevForISO(s.date);
-    const row = [s.date, day, s.slotType, s.start, s.end, s.hours, s.notes ?? ''];
+    const row = [
+      s.date,
+      day,
+      s.slotType,
+      asSheetText(s.start),
+      asSheetText(s.end),
+      s.hours,
+      s.notes ?? '',
+    ];
     const match = byKey.get(`${s.date}|${s.slotType}|${s.start}`);
     if (match) {
       updates.push({
@@ -200,4 +251,64 @@ export async function upsertSlots(sheetId, tabName, slots, token) {
     appended: appends.length,
     total: updates.length + appends.length,
   };
+}
+
+/**
+ * Delete slots by natural key `(date, slotType, start)`. Caller must hold a
+ * per-(sheet,tab) mutex so concurrent POSTs don't race the rowIndex lookup.
+ *
+ * Uses `deleteDimension` to physically remove rows (rather than `values:clear`
+ * which only blanks cells and leaves an empty row that can confuse reads /
+ * the dashboard pivot). Multiple deletions are submitted as a single
+ * `batchUpdate` in **descending** rowIndex order — earlier deletions would
+ * shift later rowIndexes and target the wrong row.
+ *
+ * Match semantics use the same normalization the read path applies, so
+ * legacy rows with mangled times (e.g. "0:00", "2:15 PM") match an agent
+ * request keyed on the canonical "00:00" / "14:15".
+ *
+ * Returns `{ deleted, missed }` where `missed` lists keys that didn't match
+ * any current row (already gone, never existed, or typo).
+ */
+export async function deleteSlots(sheetId, tabName, keys, token) {
+  if (!(await tabExists(sheetId, tabName, token))) {
+    throw new SheetsError(404, `Employee tab not found: ${tabName}`);
+  }
+  const existing = await readSlots(sheetId, tabName, token);
+  const byKey = new Map();
+  for (const s of existing) {
+    byKey.set(`${s.date}|${s.slotType}|${s.start}`, s);
+  }
+
+  const matched = [];
+  const missed = [];
+  for (const k of keys) {
+    const m = byKey.get(`${k.date}|${k.slotType}|${k.start}`);
+    if (m) matched.push(m);
+    else missed.push(k);
+  }
+
+  if (matched.length === 0) {
+    return { deleted: 0, missed };
+  }
+
+  const numericSheetId = await getNumericSheetId(sheetId, tabName, token);
+  matched.sort((a, b) => b.rowIndex - a.rowIndex);
+  const requests = matched.map((m) => ({
+    deleteDimension: {
+      range: {
+        sheetId: numericSheetId,
+        dimension: 'ROWS',
+        startIndex: m.rowIndex - 1,
+        endIndex: m.rowIndex,
+      },
+    },
+  }));
+
+  await sheetsFetch(`${SHEETS_API_BASE}/${sheetId}:batchUpdate`, token, {
+    method: 'POST',
+    body: JSON.stringify({ requests }),
+  });
+
+  return { deleted: matched.length, missed };
 }

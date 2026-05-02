@@ -246,6 +246,26 @@ otherwise appended. Writes on the same `(sheetId, tabName)` pair are
 serialized by a per-pair async-mutex, so two concurrent agents cannot
 race to create duplicate rows.
 
+### `DELETE /api/hours/:tabName?sheetId=<id>`
+
+```bash
+curl -X DELETE "https://<deploy>/api/hours/jane-smith?sheetId=$SHEET_ID" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '[
+    {"date":"2026-04-13","slotType":"work","start":"08:00"},
+    {"date":"2026-04-13","slotType":"break","start":"12:00"}
+  ]'
+```
+
+Body is a zod-validated array (1–200 keys) of `(date, slotType, start)` —
+the same natural key the upsert path uses. Returns
+`{ ok, deleted, missed }`; `missed` lists keys that didn't match any
+current row (already gone, never existed, or typo). Rows are physically
+removed via `deleteDimension` (not value-cleared), and writes serialize
+through the same per-`(sheetId, tabName)` mutex as POST so deletes can't
+race in-flight upserts.
+
 ### `GET /api/weeks/:tabName?sheetId=<id>`
 
 ```bash
@@ -276,6 +296,9 @@ Unprotected. Returns `{ status, service, version, auth: "oauth-bearer", ts }`.
 >   week's slots.
 > - `POST /api/hours/<tabName>?sheetId=...` accepts a JSON array of slots:
 >   `{ date: "YYYY-MM-DD", slotType: "work" | "break", start: "HH:MM" (24h), end: "HH:MM" (24h), hours: number, notes?: string }`
+> - `DELETE /api/hours/<tabName>?sheetId=...` accepts a JSON array of natural
+>   keys: `{ date, slotType, start }` — physically removes those rows.
+>   Response `{ deleted, missed }` reports how many matched.
 > - `hours` is a decimal number. Work slots positive (`8.5` = 8h 30min).
 >   Break slots **negative** so daily totals subtract correctly.
 > - When given a paper timesheet image, first call `/api/employees` to map

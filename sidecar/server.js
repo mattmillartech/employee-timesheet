@@ -15,6 +15,7 @@ import express from 'express';
 import { Mutex } from 'async-mutex';
 import { z } from 'zod';
 import {
+  deleteSlots,
   listEmployees,
   listWeekStarts,
   readSlotsInWeek,
@@ -95,6 +96,16 @@ const SlotInput = z.object({
 });
 const SlotsArray = z.array(SlotInput).min(1).max(200);
 
+// Delete keys are a strict subset of SlotInput — only the natural-key fields,
+// no times-to-write / hours / notes. Same HH:MM regex as the upsert path so
+// agents can't sneak in a malformed key that wouldn't match anything anyway.
+const DeleteKey = z.object({
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'date must be YYYY-MM-DD'),
+  slotType: z.enum(['work', 'break']),
+  start: z.string().regex(/^([01]\d|2[0-3]):([0-5]\d)$/, 'start must be HH:MM (24h)'),
+});
+const DeleteKeysArray = z.array(DeleteKey).min(1).max(200);
+
 // GET /api/employees?sheetId=...
 app.get('/api/employees', async (req, res) => {
   const sheetId = requireSheetId(req, res);
@@ -154,6 +165,30 @@ app.post('/api/hours/:tabName', async (req, res) => {
     }
     const result = await mutexFor(`${sheetId}:${tabName}`).runExclusive(() =>
       upsertSlots(sheetId, tabName, parsed.data, req.accessToken),
+    );
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+// DELETE /api/hours/:tabName?sheetId=...
+// Body: [{ date, slotType, start }, ...]   — natural keys, same as the
+// dedup-on-upsert side. Returns { ok, deleted, missed }. Uses the same
+// per-(sheet,tab) mutex as POST so a delete can't race an in-flight upsert.
+app.delete('/api/hours/:tabName', async (req, res) => {
+  const sheetId = requireSheetId(req, res);
+  if (!sheetId) return;
+  const { tabName } = req.params;
+  try {
+    const parsed = DeleteKeysArray.safeParse(req.body);
+    if (!parsed.success) {
+      return res
+        .status(400)
+        .json({ error: 'invalid_body', issues: parsed.error.issues });
+    }
+    const result = await mutexFor(`${sheetId}:${tabName}`).runExclusive(() =>
+      deleteSlots(sheetId, tabName, parsed.data, req.accessToken),
     );
     res.json({ ok: true, ...result });
   } catch (err) {
