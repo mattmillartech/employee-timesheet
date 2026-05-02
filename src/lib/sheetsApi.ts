@@ -40,6 +40,12 @@ async function sheetsFetch<T>(
   init?: RequestInit,
 ): Promise<T> {
   const response = await fetch(url, {
+    // `cache: 'no-store'` forces the browser to bypass any HTTP cache.
+    // The Sheets API serves `cache-control: private, max-age=0`, but with
+    // a stable Bearer token + URL the browser can still serve a stale
+    // body via the disk cache between mutations and the next read,
+    // which makes a freshly-deleted row appear to "come back".
+    cache: 'no-store',
     ...init,
     headers: {
       Authorization: `Bearer ${token}`,
@@ -179,19 +185,47 @@ export async function updateRow(
   });
 }
 
+/**
+ * Physically remove a row from an employee tab via `deleteDimension`.
+ *
+ * We previously used `values:clear` here, which only blanks the cells —
+ * relying on `rowToSlot` to skip the now-empty row on read. Empirically
+ * that path was leaving rows behind (likely the `:clear` was succeeding
+ * but a stale read or a wrong-indexed clear was leaving the original row
+ * intact). `deleteDimension` removes the row entirely, so even if the
+ * caller's `rowIndex` were off by one we'd shift a different row instead
+ * of leaving the bad row behind silently. Caller MUST reload after to
+ * resync rowIndexes since subsequent rows just shifted up by one.
+ */
 export async function deleteRow(
   sheetId: string,
   tabName: string,
   rowIndex: number,
   token: string,
-  rangeSpec = 'A:G',
 ): Promise<void> {
-  const [startCol, endCol] = rangeSpec.split(':') as [string, string];
-  const url =
-    `${SHEETS_API_BASE}/${sheetId}/values/` +
-    encodeRange(tabName, `${startCol}${rowIndex}:${endCol}${rowIndex}`) +
-    ':clear';
-  await sheetsFetch(url, token, { method: 'POST', body: JSON.stringify({}) });
+  const props = await listSheetProperties(sheetId, token);
+  const sheet = props.sheets?.find((s) => s.properties?.title === tabName);
+  const numericSheetId = sheet?.properties?.sheetId;
+  if (numericSheetId === undefined) {
+    throw new SheetsApiError(404, `Tab not found: ${tabName}`);
+  }
+  await sheetsFetch(`${SHEETS_API_BASE}/${sheetId}:batchUpdate`, token, {
+    method: 'POST',
+    body: JSON.stringify({
+      requests: [
+        {
+          deleteDimension: {
+            range: {
+              sheetId: numericSheetId,
+              dimension: 'ROWS',
+              startIndex: rowIndex - 1,
+              endIndex: rowIndex,
+            },
+          },
+        },
+      ],
+    }),
+  });
 }
 
 export type BatchUpdateEntry = {
