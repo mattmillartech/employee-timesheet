@@ -146,7 +146,12 @@ export function AuthProvider({ children }: { children: ReactNode }): JSX.Element
           pendingRejectRef.current?.(err);
           pendingRejectRef.current = null;
           pendingResolveRef.current = null;
-          setState((prev) => ({ ...prev, status: 'error', error: response.error ?? 'auth error' }));
+          // Do NOT set status: 'error' here. The caller (signIn / bootstrap /
+          // getToken) decides whether this token-flow failure should bump the
+          // user back to LoginPage. Bootstrap silently swallows so a failed
+          // background silent-refresh doesn't clobber an optimistic
+          // signed-in state and kick the user out — that's the loop the
+          // previous version got stuck in.
           return;
         }
         tokenRef.current = response.access_token;
@@ -160,7 +165,9 @@ export function AuthProvider({ children }: { children: ReactNode }): JSX.Element
         pendingRejectRef.current?.(new Error(err.message || err.type || 'auth error'));
         pendingRejectRef.current = null;
         pendingResolveRef.current = null;
-        setState((prev) => ({ ...prev, status: 'error', error: err.message || err.type }));
+        // Same reasoning as above — don't unilaterally set status: 'error'.
+        // signIn's try/catch surfaces the error to LoginPage when it's
+        // user-initiated; bootstrap intentionally swallows.
       },
     });
     tokenClientRef.current = client;
