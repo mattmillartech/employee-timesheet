@@ -196,7 +196,18 @@ export function SheetProvider({ children }: { children: ReactNode }): JSX.Elemen
       setError(null);
       try {
         // (1) Drive prefs — authoritative source of truth across devices.
-        const prefsResult = await run((t) => readAppPrefs(t));
+        // Best-effort: if Drive can't be reached (e.g. silent token refresh
+        // popup-blocked on bootstrap with no user gesture), fall through
+        // to the local fallback chain instead of erroring out the whole
+        // bootstrap. The next user-initiated action that needs a token
+        // will refresh in response to a real click and Drive prefs will
+        // catch up on the next load.
+        let prefsResult: Awaited<ReturnType<typeof readAppPrefs>> = null;
+        try {
+          prefsResult = await run((t) => readAppPrefs(t));
+        } catch (err) {
+          console.warn('[sheet-context] readAppPrefs failed; using local fallback', err);
+        }
         if (cancelled) return;
         if (prefsResult?.prefs.sheetId) {
           prefsFileIdRef.current = prefsResult.fileId;
