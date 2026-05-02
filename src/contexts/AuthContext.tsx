@@ -173,7 +173,12 @@ export function AuthProvider({ children }: { children: ReactNode }): JSX.Element
       return new Promise((resolve, reject) => {
         pendingResolveRef.current = resolve;
         pendingRejectRef.current = reject;
-        client.requestAccessToken({ prompt });
+        // `hint` pre-fills the account so multi-account users don't get an
+        // account picker on silent refresh — without it, GIS often prompts
+        // even with prompt: '' once the previous access token expires.
+        const config: { prompt: '' | 'consent'; hint?: string } = { prompt };
+        if (emailRef.current) config.hint = emailRef.current;
+        client.requestAccessToken(config);
       });
     },
     [initTokenClient],
@@ -250,53 +255,55 @@ export function AuthProvider({ children }: { children: ReactNode }): JSX.Element
     [requestToken, persistCurrent],
   );
 
-  // Bootstrap: try to restore a previous session from localStorage. If still
-  // valid, land the user on the app directly (no GIS popup). If stale but we
-  // have the email, attempt silent refresh; Google may auto-renew without a
-  // popup if the user's Google session is still active.
+  // Bootstrap. Goal: a reload should NEVER bounce the user back to the GIS
+  // consent flow if they have a stored session — that flow is long because
+  // the OAuth client is unverified, and the maintainer reloads often.
+  //
+  // Strategy: optimistically restore from localStorage and mark the user
+  // signed-in immediately. Skip the userinfo round-trip on bootstrap (the
+  // allowlist was already enforced when they signed in originally; the
+  // first real Sheets API call still 401s if the token's revoked). If the
+  // stored token is past expiry, fire a silent refresh in the background —
+  // hint-pre-filled to the cached email so GIS doesn't pop a picker. If
+  // the silent refresh fails, the next API call's 401 path or an explicit
+  // sign-out is what eventually clears the session, not bootstrap itself.
   useEffect(() => {
     let cancelled = false;
-    void (async () => {
-      const stored = readStoredSession();
-      if (!stored) {
-        if (!cancelled) setState({ status: 'signed-out', email: null, expiresAt: null, error: null });
-        return;
-      }
-      const stillValid = stored.expiresAt - TOKEN_EXPIRY_BUFFER_MS > Date.now();
-      if (stillValid) {
-        tokenRef.current = stored.token;
-        tokenExpiresAtRef.current = stored.expiresAt;
-        emailRef.current = stored.email;
+    const stored = readStoredSession();
+    if (!stored) {
+      setState({ status: 'signed-out', email: null, expiresAt: null, error: null });
+      return;
+    }
+    tokenRef.current = stored.token;
+    tokenExpiresAtRef.current = stored.expiresAt;
+    emailRef.current = stored.email;
+    setState({
+      status: 'signed-in',
+      email: stored.email,
+      expiresAt: stored.expiresAt,
+      error: null,
+    });
+    // If the access token is past its useful life, kick off a silent refresh
+    // in the background. We don't block the UI on this — the user is already
+    // viewing the app; the new token (or the failure to get one) just shows
+    // up on the next API call via getToken's existing refresh path.
+    const stillValid = stored.expiresAt - TOKEN_EXPIRY_BUFFER_MS > Date.now();
+    if (!stillValid) {
+      void (async () => {
         try {
-          // Validate against userinfo — also confirms allowlist + token not revoked.
-          await completeSignIn(stored.token, stored.expiresAt);
+          await requestToken('');
+          if (cancelled) return;
+          persistCurrent();
+          setState((prev) => ({ ...prev, expiresAt: tokenExpiresAtRef.current }));
         } catch {
-          // Token was stale or revoked on the server side — drop session and fall
-          // through to silent refresh.
-          tokenRef.current = null;
-          tokenExpiresAtRef.current = null;
-          clearStoredSession();
-          if (!cancelled) setState({ status: 'signed-out', email: null, expiresAt: null, error: null });
+          // Silent refresh failed (Google session ended, consent revoked,
+          // third-party cookies blocked, etc.). Leave the user "optimistically
+          // signed in" — getToken will retry on the next API call and surface
+          // a useful error if it really can't refresh. Forcing them out here
+          // is the loop the user explicitly asked us to break.
         }
-        return;
-      }
-      // Token expired — try silent refresh. If Google's session is warm this
-      // finishes without a popup; otherwise the callback fires with an error
-      // and we drop the user onto the sign-in screen.
-      emailRef.current = stored.email;
-      try {
-        const fresh = await requestToken('');
-        if (cancelled) return;
-        await completeSignIn(fresh, tokenExpiresAtRef.current ?? Date.now() + 3_600_000);
-      } catch {
-        if (cancelled) return;
-        tokenRef.current = null;
-        tokenExpiresAtRef.current = null;
-        emailRef.current = null;
-        clearStoredSession();
-        setState({ status: 'signed-out', email: null, expiresAt: null, error: null });
-      }
-    })();
+      })();
+    }
     return () => {
       cancelled = true;
     };

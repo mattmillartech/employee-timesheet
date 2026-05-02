@@ -358,19 +358,13 @@ export function EntryPage(): JSX.Element {
 
   const handleSlotDelete = useCallback(
     async (slotId: string): Promise<void> => {
-      // Resolve the target from current state (NOT inside setSlots) so we
-      // don't optimistically remove before the API confirms — otherwise a
-      // user who deletes-then-navigates can race the in-flight clear: Entry
-      // remounts, reload() re-pulls from the sheet before clearRow has hit,
-      // and the row reappears.
-      let target: Slot | undefined;
-      setSlots((prev) => {
-        target = prev.find((s) => s.slotId === slotId);
-        return prev;
-      });
+      // Don't optimistically remove from local state. If we filter the slot
+      // out before the API confirms, a user who deletes-then-navigates can
+      // race the in-flight clear: Entry remounts, reload() re-pulls from the
+      // sheet before clearRow has hit, and the row reappears.
+      const target = slots.find((s) => s.slotId === slotId);
       if (!target) return;
       if (target.rowIndex === undefined) {
-        // Local-only placeholder, never persisted. Drop it immediately.
         setSlots((prev) => prev.filter((s) => s.slotId !== slotId));
         clearPending(slotId);
         return;
@@ -379,9 +373,8 @@ export function EntryPage(): JSX.Element {
       markPending(slotId, { saving: true, error: null });
       try {
         await run((t) => clearRow(sheetId, selectedTab, rowIndex, t));
-        // Reload so local state matches the sheet — any concurrent edit /
-        // duplicate row drift gets flushed here, and there's no window where
-        // a stale row can resurface on the next page mount.
+        // Reload so local state matches the sheet — guarantees no stale row
+        // can resurface on the next page mount.
         await reload();
         clearPending(slotId);
       } catch (err) {
@@ -390,7 +383,7 @@ export function EntryPage(): JSX.Element {
         toast.error(`Delete failed: ${msg}`);
       }
     },
-    [run, sheetId, selectedTab, reload],
+    [slots, run, sheetId, selectedTab, reload],
   );
 
   const handleAddSlot = useCallback(
