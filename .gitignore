@@ -39,3 +39,14 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# local-only IDE / agent / MCP config — must not be committed to a public repo
+.vscode/
+.claude-tower/
+.mcp.json
+skills-lock.json
+.claude/skills/agent-browser/
+.claude/skills/find-skills/
+.claude/skills/frontend-design/
+.claude/skills/vercel-react-best-practices/
+.claude/skills/web-design-guidelines/
