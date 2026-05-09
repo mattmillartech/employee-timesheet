@@ -15,10 +15,13 @@ import express from 'express';
 import { Mutex } from 'async-mutex';
 import { z } from 'zod';
 import {
+  createEmployee,
   deleteSlots,
   listEmployees,
   listWeekStarts,
   readSlotsInWeek,
+  reorderEmployees,
+  updateEmployee,
   upsertSlots,
 } from './lib/sheetsClient.js';
 
@@ -106,12 +109,117 @@ const DeleteKey = z.object({
 });
 const DeleteKeysArray = z.array(DeleteKey).min(1).max(200);
 
+// =====================
+// Employee CRUD
+// =====================
+
+const EmployeeCreateInput = z.object({
+  tabName: z
+    .string()
+    .regex(
+      /^[a-z0-9][a-z0-9-]{0,62}$/,
+      'tabName must be lowercase a-z0-9 + hyphens, start with alnum, ≤ 63 chars',
+    ),
+  displayName: z.string().min(1, 'displayName is required').max(120),
+  active: z.boolean().optional(),
+  color: z.string().optional(),
+  sortOrder: z.number().int().nonnegative().optional(),
+});
+
+const EmployeePatchInput = z
+  .object({
+    active: z.boolean().optional(),
+    displayName: z.string().min(1).max(120).optional(),
+    color: z.string().optional(),
+    sortOrder: z.number().int().nonnegative().optional(),
+  })
+  .refine(
+    (p) =>
+      p.active !== undefined ||
+      p.displayName !== undefined ||
+      p.color !== undefined ||
+      p.sortOrder !== undefined,
+    { message: 'patch must include at least one of: active, displayName, color, sortOrder' },
+  );
+
+const ReorderInput = z.object({
+  orderedTabNames: z.array(z.string().min(1)).min(1).max(200),
+});
+
 // GET /api/employees?sheetId=...
 app.get('/api/employees', async (req, res) => {
   const sheetId = requireSheetId(req, res);
   if (!sheetId) return;
   try {
     res.json(await listEmployees(sheetId, req.accessToken));
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+// POST /api/employees?sheetId=...
+// Body: { tabName, displayName, active?, color?, sortOrder? }
+// Creates the per-employee tab + appends a `_Config` row.
+app.post('/api/employees', async (req, res) => {
+  const sheetId = requireSheetId(req, res);
+  if (!sheetId) return;
+  try {
+    const parsed = EmployeeCreateInput.safeParse(req.body);
+    if (!parsed.success) {
+      return res
+        .status(400)
+        .json({ error: 'invalid_body', issues: parsed.error.issues });
+    }
+    const created = await mutexFor(`${sheetId}:_Config`).runExclusive(() =>
+      createEmployee(sheetId, parsed.data, req.accessToken),
+    );
+    res.status(201).json(created);
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+// PATCH /api/employees/:tabName?sheetId=...
+// Body: { active?, displayName?, color?, sortOrder? }   (any subset)
+// Soft-delete is `{ active: false }`.
+app.patch('/api/employees/:tabName', async (req, res) => {
+  const sheetId = requireSheetId(req, res);
+  if (!sheetId) return;
+  const { tabName } = req.params;
+  try {
+    const parsed = EmployeePatchInput.safeParse(req.body);
+    if (!parsed.success) {
+      return res
+        .status(400)
+        .json({ error: 'invalid_body', issues: parsed.error.issues });
+    }
+    const updated = await mutexFor(`${sheetId}:_Config`).runExclusive(() =>
+      updateEmployee(sheetId, tabName, parsed.data, req.accessToken),
+    );
+    res.json(updated);
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+// PUT /api/employees/order?sheetId=...
+// Body: { orderedTabNames: ["jane-smith", "john-doe", ...] }
+// Rewrites the `sortOrder` column to the supplied permutation. Tabs not
+// in the array are left untouched.
+app.put('/api/employees/order', async (req, res) => {
+  const sheetId = requireSheetId(req, res);
+  if (!sheetId) return;
+  try {
+    const parsed = ReorderInput.safeParse(req.body);
+    if (!parsed.success) {
+      return res
+        .status(400)
+        .json({ error: 'invalid_body', issues: parsed.error.issues });
+    }
+    const result = await mutexFor(`${sheetId}:_Config`).runExclusive(() =>
+      reorderEmployees(sheetId, parsed.data.orderedTabNames, req.accessToken),
+    );
+    res.json({ ok: true, ...result });
   } catch (err) {
     sendError(res, err);
   }

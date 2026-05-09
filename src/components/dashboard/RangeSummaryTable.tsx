@@ -1,4 +1,4 @@
-import { formatHoursShort } from '@/lib/timeUtils';
+import { formatHours } from '@/lib/timeUtils';
 import type { AllTimeView, MonthView, YearView } from '@/lib/dashboardAggregator';
 import { format, parseISODate } from '@/lib/dateUtils';
 
@@ -46,11 +46,11 @@ function MonthTable({ view }: { view: MonthView }): JSX.Element {
                   key={i}
                   className="px-3 py-2 text-center font-mono border-l border-border/40"
                 >
-                  {v === 0 ? '—' : `${formatHoursShort(v)}h`}
+                  {v === 0 ? '—' : `${formatHours(v)}h`}
                 </td>
               ))}
               <td className="px-4 py-2.5 text-right font-mono font-medium border-l border-border/40">
-                {formatHoursShort(row.rowTotal)}h
+                {formatHours(row.rowTotal)}h
               </td>
             </tr>
           ))}
@@ -62,11 +62,11 @@ function MonthTable({ view }: { view: MonthView }): JSX.Element {
             </th>
             {view.columnTotals.map((t, i) => (
               <td key={i} className="px-3 py-2.5 text-center font-mono border-l border-border/40">
-                {t === 0 ? '—' : `${formatHoursShort(t)}h`}
+                {t === 0 ? '—' : `${formatHours(t)}h`}
               </td>
             ))}
             <td className="px-4 py-2.5 text-right font-mono border-l border-border/40">
-              {formatHoursShort(view.grandTotal)}h
+              {formatHours(view.grandTotal)}h
             </td>
           </tr>
         </tfoot>
@@ -106,11 +106,11 @@ function YearTable({ view }: { view: YearView }): JSX.Element {
               </th>
               {row.cells.map((v, i) => (
                 <td key={i} className="px-3 py-2 text-center font-mono border-l border-border/40">
-                  {v === 0 ? '—' : formatHoursShort(v)}
+                  {v === 0 ? '—' : formatHours(v)}
                 </td>
               ))}
               <td className="px-4 py-2.5 text-right font-mono font-medium border-l border-border/40">
-                {formatHoursShort(row.rowTotal)}h
+                {formatHours(row.rowTotal)}h
               </td>
             </tr>
           ))}
@@ -122,11 +122,11 @@ function YearTable({ view }: { view: YearView }): JSX.Element {
             </th>
             {view.columnTotals.map((t, i) => (
               <td key={i} className="px-3 py-2.5 text-center font-mono border-l border-border/40">
-                {t === 0 ? '—' : formatHoursShort(t)}
+                {t === 0 ? '—' : formatHours(t)}
               </td>
             ))}
             <td className="px-4 py-2.5 text-right font-mono border-l border-border/40">
-              {formatHoursShort(view.grandTotal)}h
+              {formatHours(view.grandTotal)}h
             </td>
           </tr>
         </tfoot>
@@ -168,7 +168,7 @@ function AllTimeTable({ view }: { view: AllTimeView }): JSX.Element {
               <td className="px-4 py-2.5 font-mono text-muted">{row.lastEntry ?? '—'}</td>
               <td className="px-4 py-2.5 text-right font-mono">{row.daysWorked}</td>
               <td className="px-4 py-2.5 text-right font-mono font-medium">
-                {formatHoursShort(row.totalHours)}h
+                {formatHours(row.totalHours)}h
               </td>
             </tr>
           ))}
@@ -179,7 +179,7 @@ function AllTimeTable({ view }: { view: AllTimeView }): JSX.Element {
               GRAND TOTAL
             </th>
             <td className="px-4 py-2.5 text-right font-mono">
-              {formatHoursShort(view.grandTotal)}h
+              {formatHours(view.grandTotal)}h
             </td>
           </tr>
         </tfoot>

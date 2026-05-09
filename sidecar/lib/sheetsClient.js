@@ -312,3 +312,192 @@ export async function deleteSlots(sheetId, tabName, keys, token) {
 
   return { deleted: matched.length, missed };
 }
+
+// ============================================================
+// Employee CRUD on the `_Config` tab + per-employee tab management.
+// Mirrors src/lib/sheetsApi.ts's frontend helpers so agents have parity
+// with the React UI for everything related to employees.
+// ============================================================
+
+const CONFIG_HEADER = ['tabName', 'displayName', 'active', 'color', 'sortOrder'];
+const EMPLOYEE_HEADER = ['date', 'day', 'slotType', 'start', 'end', 'hours', 'notes'];
+const TAB_NAME_RE = /^[a-z0-9][a-z0-9-]{0,62}$/;
+
+function readEmployees(rows) {
+  if (rows.length <= 1) return [];
+  const out = [];
+  for (let i = 1; i < rows.length; i++) {
+    const row = rows[i];
+    if (!row || !row[0]) continue;
+    out.push({
+      rowIndex: i + 1,
+      tabName: row[0],
+      displayName: row[1] ?? '',
+      active: String(row[2] ?? '').toUpperCase() === 'TRUE',
+      color: row[3] ?? '',
+      sortOrder: Number.parseInt(row[4] ?? '0', 10) || 0,
+    });
+  }
+  return out;
+}
+
+/**
+ * Create a new employee. Adds a per-employee tab with the canonical header
+ * row, then appends a `_Config` row. Validates `tabName` against the same
+ * slug rules the frontend uses (lowercase a-z0-9 + hyphens, ≤ 63 chars,
+ * starts with alnum) and rejects duplicates.
+ *
+ * Returns the created employee record (incl. resolved sortOrder).
+ */
+export async function createEmployee(sheetId, input, token) {
+  const tabName = String(input.tabName ?? '').trim();
+  const displayName = String(input.displayName ?? '').trim();
+  if (!TAB_NAME_RE.test(tabName)) {
+    throw new SheetsError(
+      400,
+      `tabName must be lowercase a-z0-9 + hyphens, start with alnum, ≤ 63 chars (got: "${tabName}")`,
+    );
+  }
+  if (!displayName) {
+    throw new SheetsError(400, 'displayName is required');
+  }
+
+  const existingRows = await getValues(sheetId, CONFIG_TAB, 'A:E', token);
+  const existing = readEmployees(existingRows);
+  if (existing.some((e) => e.tabName === tabName)) {
+    throw new SheetsError(409, `Employee already exists: ${tabName}`);
+  }
+  if (await tabExists(sheetId, tabName, token)) {
+    throw new SheetsError(
+      409,
+      `Sheet tab "${tabName}" already exists — pick a different tabName`,
+    );
+  }
+
+  const active = input.active === undefined ? true : Boolean(input.active);
+  const color = String(input.color ?? '');
+  const sortOrder =
+    typeof input.sortOrder === 'number' && Number.isFinite(input.sortOrder)
+      ? input.sortOrder
+      : existing.length > 0
+        ? Math.max(...existing.map((e) => e.sortOrder)) + 1
+        : 1;
+
+  // 1. addSheet for the per-employee tab.
+  await sheetsFetch(`${SHEETS_API_BASE}/${sheetId}:batchUpdate`, token, {
+    method: 'POST',
+    body: JSON.stringify({
+      requests: [
+        {
+          addSheet: {
+            properties: {
+              title: tabName,
+              gridProperties: { rowCount: 1000, columnCount: EMPLOYEE_HEADER.length },
+            },
+          },
+        },
+      ],
+    }),
+  });
+
+  // 2. Header row on the new tab.
+  await sheetsFetch(
+    `${SHEETS_API_BASE}/${sheetId}/values/${encodeRange(tabName, 'A1:G1')}?valueInputOption=USER_ENTERED`,
+    token,
+    {
+      method: 'PUT',
+      body: JSON.stringify({ values: [EMPLOYEE_HEADER] }),
+    },
+  );
+
+  // 3. Append the `_Config` row.
+  await sheetsFetch(
+    `${SHEETS_API_BASE}/${sheetId}/values/${encodeRange(CONFIG_TAB, 'A:E')}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,
+    token,
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        values: [[tabName, displayName, active ? 'TRUE' : 'FALSE', color, String(sortOrder)]],
+      }),
+    },
+  );
+
+  return { tabName, displayName, active, color, sortOrder };
+}
+
+/**
+ * Patch an employee's `_Config` row. Only the fields present in `patch` are
+ * changed; everything else stays as it was. Throws 404 if the tabName isn't
+ * in `_Config`.
+ *
+ * Note this is a soft-delete path too: `{ active: false }` hides the
+ * employee from the UI dropdown without touching their tab data, which is
+ * the spec-defined "remove" semantic.
+ */
+export async function updateEmployee(sheetId, tabName, patch, token) {
+  const rows = await getValues(sheetId, CONFIG_TAB, 'A:E', token);
+  const existing = readEmployees(rows);
+  const found = existing.find((e) => e.tabName === tabName);
+  if (!found) {
+    throw new SheetsError(404, `Employee not found in _Config: ${tabName}`);
+  }
+  const next = {
+    tabName: found.tabName,
+    displayName:
+      patch.displayName !== undefined ? String(patch.displayName) : found.displayName,
+    active: patch.active !== undefined ? Boolean(patch.active) : found.active,
+    color: patch.color !== undefined ? String(patch.color) : found.color,
+    sortOrder:
+      patch.sortOrder !== undefined && Number.isFinite(Number(patch.sortOrder))
+        ? Number(patch.sortOrder)
+        : found.sortOrder,
+  };
+  await sheetsFetch(
+    `${SHEETS_API_BASE}/${sheetId}/values/${encodeRange(CONFIG_TAB, `A${found.rowIndex}:E${found.rowIndex}`)}?valueInputOption=USER_ENTERED`,
+    token,
+    {
+      method: 'PUT',
+      body: JSON.stringify({
+        values: [
+          [
+            next.tabName,
+            next.displayName,
+            next.active ? 'TRUE' : 'FALSE',
+            next.color,
+            String(next.sortOrder),
+          ],
+        ],
+      }),
+    },
+  );
+  return next;
+}
+
+/**
+ * Rewrite the sortOrder column for the supplied tabNames, in the order given
+ * (1-indexed). tabNames not in the array are left untouched. Returns the
+ * applied (tabName → sortOrder) map.
+ */
+export async function reorderEmployees(sheetId, orderedTabNames, token) {
+  const rows = await getValues(sheetId, CONFIG_TAB, 'A:E', token);
+  const existing = readEmployees(rows);
+  const desired = new Map();
+  orderedTabNames.forEach((n, i) => desired.set(String(n), i + 1));
+  const data = [];
+  const applied = {};
+  for (const e of existing) {
+    const want = desired.get(e.tabName);
+    if (want === undefined || want === e.sortOrder) continue;
+    data.push({
+      range: `${CONFIG_TAB}!E${e.rowIndex}:E${e.rowIndex}`,
+      values: [[String(want)]],
+    });
+    applied[e.tabName] = want;
+  }
+  if (data.length === 0) return { applied: {}, untouched: existing.map((e) => e.tabName) };
+  await sheetsFetch(`${SHEETS_API_BASE}/${sheetId}/values:batchUpdate`, token, {
+    method: 'POST',
+    body: JSON.stringify({ valueInputOption: 'USER_ENTERED', data }),
+  });
+  return { applied };
+}

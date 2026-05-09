@@ -119,3 +119,27 @@ export function formatHoursShort(h: number): string {
   const rounded = Math.round(h * 10) / 10;
   return rounded.toFixed(1);
 }
+
+/**
+ * Decimal hours → "#h#m" with sign preserved. Examples:
+ *   4.6   → "4h36m"
+ *   8     → "8h"
+ *   0.5   → "30m"
+ *   1.083 → "1h5m"
+ *   -1    → "-1h"
+ *   0     → "0m"
+ * Used for per-day Dashboard cells where hours-and-minutes is more
+ * intuitive than a decimal — "4h36m" reads truer to a paper timesheet
+ * than "4.6h" does.
+ */
+export function formatHoursAsHM(h: number): string {
+  if (!Number.isFinite(h)) return '—';
+  const sign = h < 0 ? '-' : '';
+  const totalMin = Math.round(Math.abs(h) * 60);
+  if (totalMin === 0) return '0m';
+  const hh = Math.floor(totalMin / 60);
+  const mm = totalMin % 60;
+  if (hh === 0) return `${sign}${mm}m`;
+  if (mm === 0) return `${sign}${hh}h`;
+  return `${sign}${hh}h${mm}m`;
+}

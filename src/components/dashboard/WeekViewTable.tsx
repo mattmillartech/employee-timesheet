@@ -1,7 +1,7 @@
 import clsx from 'clsx';
 import { Coffee } from 'lucide-react';
 import { format, parseISODate } from '@/lib/dateUtils';
-import { formatForDisplay, formatHoursShort } from '@/lib/timeUtils';
+import { formatForDisplay, formatHours, formatHoursAsHM } from '@/lib/timeUtils';
 import type { WeekView } from '@/lib/dashboardAggregator';
 import type { DisplayMode } from '@/types';
 
@@ -72,14 +72,14 @@ export function WeekViewTable({ view, displayMode, onCellClick }: WeekViewTableP
                           {cell.latestEnd ? ` → ${formatForDisplay(cell.latestEnd, displayMode)}` : ''}
                         </div>
                         <div className="font-mono font-medium inline-flex items-center gap-1 justify-center">
-                          <span>{formatHoursShort(cell.totalHours)}h</span>
+                          <span>{formatHoursAsHM(cell.totalHours)}</span>
                           {cell.hasBreak ? (
                             <span
                               className="inline-flex items-center gap-0.5 text-muted text-[10px] font-normal"
-                              title={`${formatHoursShort(cell.breakHours)}h break deducted`}
+                              title={`${formatHoursAsHM(cell.breakHours)} break deducted (${formatHours(cell.breakHours)}h)`}
                             >
                               <Coffee className="w-3 h-3" aria-hidden />
-                              −{formatHoursShort(cell.breakHours)}
+                              −{formatHoursAsHM(cell.breakHours)}
                             </span>
                           ) : null}
                         </div>
@@ -91,7 +91,7 @@ export function WeekViewTable({ view, displayMode, onCellClick }: WeekViewTableP
                 );
               })}
               <td className="px-4 py-2.5 text-right font-mono font-medium border-l border-border/40">
-                {row.rowTotal === 0 ? '—' : `${formatHoursShort(row.rowTotal)}h`}
+                {row.rowTotal === 0 ? '—' : `${formatHours(row.rowTotal)}h`}
               </td>
             </tr>
           ))}
@@ -103,11 +103,11 @@ export function WeekViewTable({ view, displayMode, onCellClick }: WeekViewTableP
             </th>
             {view.columnTotals.map((t, i) => (
               <td key={i} className="px-3 py-2.5 text-center font-mono border-l border-border/40">
-                {t === 0 ? '—' : `${formatHoursShort(t)}h`}
+                {t === 0 ? '—' : `${formatHours(t)}h`}
               </td>
             ))}
             <td className="px-4 py-2.5 text-right font-mono border-l border-border/40">
-              {formatHoursShort(view.grandTotal)}h
+              {formatHours(view.grandTotal)}h
             </td>
           </tr>
         </tfoot>
