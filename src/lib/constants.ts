@@ -43,6 +43,13 @@ export const LOCALSTORAGE_AUTH_SESSION_KEY = 'timesheetAuthSession';
 export const DEFAULT_NEW_SHEET_TITLE = 'Employee Timesheet';
 
 export const TOKEN_EXPIRY_BUFFER_MS = 60_000;
+/**
+ * Refresh the access token this many ms before it expires, while the tab is
+ * visible. Larger than TOKEN_EXPIRY_BUFFER_MS on purpose: the goal is to
+ * stay well clear of expiry so the user's next API call never has to wait
+ * on an on-demand refresh that might land in the popup-blocked path.
+ */
+export const TOKEN_PROACTIVE_REFRESH_MS = 5 * 60_000;
 
 export const DAY_ABBREVIATIONS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'] as const;
 

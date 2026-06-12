@@ -13,6 +13,7 @@ import {
   LOCALSTORAGE_AUTH_SESSION_KEY,
   SCOPES,
   TOKEN_EXPIRY_BUFFER_MS,
+  TOKEN_PROACTIVE_REFRESH_MS,
 } from '@/lib/constants';
 import { fetchUserInfo } from '@/lib/sheetsApi';
 
@@ -120,6 +121,17 @@ export function AuthProvider({ children }: { children: ReactNode }): JSX.Element
   const tokenClientRef = useRef<GisTokenClient | null>(null);
   const pendingResolveRef = useRef<((token: string) => void) | null>(null);
   const pendingRejectRef = useRef<((err: Error) => void) | null>(null);
+  // Coalesces concurrent token requests behind a single in-flight promise.
+  // GIS exposes only one callback per token client, so two overlapping
+  // requestAccessToken calls clobber each other's pending resolve/reject
+  // (above) and leave the earlier promise forever unsettled. On a cold load
+  // with an expired stored token, three callers race for a token at once —
+  // bootstrap's background refresh, the Drive-prefs read, and the first
+  // loadAll — so a losing caller's await would hang and wedge SheetContext at
+  // "Loading sheet data…" until a manual refresh (which finds the
+  // freshly-persisted token and skips the refresh path entirely). Sharing one
+  // promise makes every caller settle together.
+  const inFlightRef = useRef<Promise<string> | null>(null);
 
   const persistCurrent = useCallback((): void => {
     if (tokenRef.current && tokenExpiresAtRef.current && emailRef.current) {
@@ -175,18 +187,36 @@ export function AuthProvider({ children }: { children: ReactNode }): JSX.Element
   }, [persistCurrent]);
 
   const requestToken = useCallback(
-    async (prompt: '' | 'consent'): Promise<string> => {
-      const client = await initTokenClient();
-      return new Promise((resolve, reject) => {
-        pendingResolveRef.current = resolve;
-        pendingRejectRef.current = reject;
-        // `hint` pre-fills the account so multi-account users don't get an
-        // account picker on silent refresh — without it, GIS often prompts
-        // even with prompt: '' once the previous access token expires.
-        const config: { prompt: '' | 'consent'; hint?: string } = { prompt };
-        if (emailRef.current) config.hint = emailRef.current;
-        client.requestAccessToken(config);
-      });
+    (prompt: '' | 'consent'): Promise<string> => {
+      // If a request is already in flight, every caller awaits the same
+      // promise instead of starting an overlapping GIS call that would clobber
+      // the shared pending resolve/reject. inFlightRef is assigned
+      // synchronously below, so simultaneous callers in the same tick all
+      // observe it. (A 'consent' that lands during an in-flight silent refresh
+      // is intentionally coalesced into it; on the rare miss the user just
+      // clicks Sign in again, which then runs with nothing in flight.)
+      if (inFlightRef.current) return inFlightRef.current;
+      const p = (async (): Promise<string> => {
+        const client = await initTokenClient();
+        return new Promise<string>((resolve, reject) => {
+          pendingResolveRef.current = resolve;
+          pendingRejectRef.current = reject;
+          // `hint` pre-fills the account so multi-account users don't get an
+          // account picker on silent refresh — without it, GIS often prompts
+          // even with prompt: '' once the previous access token expires.
+          const config: { prompt: '' | 'consent'; hint?: string } = { prompt };
+          if (emailRef.current) config.hint = emailRef.current;
+          client.requestAccessToken(config);
+        });
+      })();
+      inFlightRef.current = p;
+      // Free the slot once settled (either way) so the next expiry triggers a
+      // fresh request rather than reusing a resolved/rejected promise.
+      const clear = (): void => {
+        if (inFlightRef.current === p) inFlightRef.current = null;
+      };
+      void p.then(clear, clear);
+      return p;
     },
     [initTokenClient],
   );
@@ -254,10 +284,35 @@ export function AuthProvider({ children }: { children: ReactNode }): JSX.Element
       const stillValid =
         token !== null && expiresAt !== null && expiresAt - TOKEN_EXPIRY_BUFFER_MS > Date.now();
       if (!forceRefresh && stillValid) return token;
-      const fresh = await requestToken('');
-      persistCurrent();
-      setState((prev) => ({ ...prev, expiresAt: tokenExpiresAtRef.current }));
-      return fresh;
+      try {
+        const fresh = await requestToken('');
+        persistCurrent();
+        setState((prev) => ({ ...prev, expiresAt: tokenExpiresAtRef.current }));
+        return fresh;
+      } catch (err) {
+        // Silent refresh failed — almost always because the browser's Google
+        // session went stale and GIS fell back from a silent iframe to a
+        // popup, which the browser blocked because there's no active user
+        // gesture (the user just refocused the tab — they didn't click
+        // anything). The optimistic "signed-in" state we restored on
+        // bootstrap can't recover from here without a real user gesture, so
+        // bounce to LoginPage. The user's click on "Sign in with Google"
+        // gives GIS the gesture it needs — same effect as the manual
+        // sign-out + sign-in workaround, just automatic. Without this, every
+        // page surfaces an opaque "Failed to open popup window" error from
+        // SheetContext until the user signs out manually.
+        tokenRef.current = null;
+        tokenExpiresAtRef.current = null;
+        emailRef.current = null;
+        clearStoredSession();
+        setState({
+          status: 'signed-out',
+          email: null,
+          expiresAt: null,
+          error: 'Your session expired. Please sign in again.',
+        });
+        throw err instanceof Error ? err : new Error(String(err));
+      }
     },
     [requestToken, persistCurrent],
   );
@@ -317,6 +372,68 @@ export function AuthProvider({ children }: { children: ReactNode }): JSX.Element
     // Only on mount.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Proactive refresh while signed in. Keeps the access token comfortably
+  // ahead of expiry so the next user action never has to wait on an
+  // on-demand refresh — which is what triggers the popup-blocked failure
+  // path when the browser's Google session has gone stale. Only runs while
+  // the tab is visible: a refresh fired in a backgrounded tab has no user
+  // gesture and adds no value vs. waiting until the user actually returns.
+  // Failures are swallowed; the call-driven getToken path is the safety
+  // net that bounces to LoginPage if a refresh is truly impossible.
+  useEffect(() => {
+    if (state.status !== 'signed-in') return;
+    const expiresAt = state.expiresAt;
+    if (expiresAt === null) return;
+
+    let cancelled = false;
+    let timer: number | undefined;
+
+    const refresh = async (): Promise<void> => {
+      if (cancelled) return;
+      try {
+        await requestToken('');
+        if (cancelled) return;
+        persistCurrent();
+        setState((prev) => ({ ...prev, expiresAt: tokenExpiresAtRef.current }));
+      } catch {
+        // Swallow — call-driven getToken handles the unrecoverable case
+        // by bouncing the user to LoginPage with a "Session expired" hint.
+      }
+    };
+
+    const schedule = (): void => {
+      if (timer !== undefined) window.clearTimeout(timer);
+      if (document.visibilityState !== 'visible') return;
+      const delay = Math.max(0, expiresAt - TOKEN_PROACTIVE_REFRESH_MS - Date.now());
+      timer = window.setTimeout(() => {
+        void refresh();
+      }, delay);
+    };
+
+    const onVisibility = (): void => {
+      if (document.visibilityState !== 'visible') {
+        if (timer !== undefined) window.clearTimeout(timer);
+        return;
+      }
+      // If the token already crossed the proactive window while we were
+      // hidden, refresh now; otherwise re-arm the timer for the remainder.
+      if (expiresAt - TOKEN_PROACTIVE_REFRESH_MS <= Date.now()) {
+        void refresh();
+      } else {
+        schedule();
+      }
+    };
+
+    schedule();
+    document.addEventListener('visibilitychange', onVisibility);
+
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [state.status, state.expiresAt, requestToken, persistCurrent]);
 
   const value = useMemo<AuthContextValue>(
     () => ({ ...state, signIn, signOut, getToken }),

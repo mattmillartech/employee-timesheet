@@ -49,6 +49,13 @@ export function LoginPage(): JSX.Element {
             <p className="mt-1 text-fg/80 break-words">{error}</p>
           </div>
         ) : null}
+
+        {status === 'signed-out' && error ? (
+          <div className="p-4 rounded-md border border-accent/40 bg-accent/10 text-sm">
+            <p className="font-medium text-accent">Session expired</p>
+            <p className="mt-1 text-fg/80 break-words">{error}</p>
+          </div>
+        ) : null}
       </div>
     </main>
   );
