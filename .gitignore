@@ -50,3 +50,8 @@ skills-lock.json
 .claude/skills/frontend-design/
 .claude/skills/vercel-react-best-practices/
 .claude/skills/web-design-guidelines/
+
+# local-only agent orchestration tool state (claude-flow / swarm / scheduler)
+.claude-flow/
+.swarm/
+.claude/scheduled_tasks.lock
