@@ -61,7 +61,7 @@ export function WeekViewTable({ view, displayMode, onCellClick }: WeekViewTableP
                       hasData ? 'text-fg' : 'text-muted/70',
                       onCellClick && 'cursor-pointer hover:bg-surface-2',
                     )}
-                    onClick={() => (hasData ? onCellClick?.(row.employee.tabName, cell.date) : undefined)}
+                    onClick={() => onCellClick?.(row.employee.tabName, cell.date)}
                   >
                     {hasData ? (
                       <div className="space-y-0.5 leading-tight">
