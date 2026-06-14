@@ -15,7 +15,7 @@ import {
   slotToRowDerived,
   updateRow,
 } from '@/lib/sheetsApi';
-import { dayAbbrev, formatWeekRange, parseISODate } from '@/lib/dateUtils';
+import { dayAbbrev, formatWeekRange, parseISODate, toISODate } from '@/lib/dateUtils';
 import { calculateHours, formatHours, isValidHHMM } from '@/lib/timeUtils';
 import { EMPLOYEE_RANGE } from '@/lib/constants';
 import type { Slot, SlotType } from '@/types';
@@ -66,7 +66,8 @@ export function EntryPage(): JSX.Element {
 
   const requestedTab = (searchParams.get('employee') ?? '').trim();
   const requestedDate = (searchParams.get('date') ?? '').trim();
-  const requestedDateISO = parseISODate(requestedDate) ? requestedDate : undefined;
+  const parsedRequestedDate = parseISODate(requestedDate);
+  const requestedDateISO = parsedRequestedDate ? toISODate(parsedRequestedDate) : undefined;
 
   const week = useWeekNav(settings.timezone, requestedDateISO);
 
@@ -185,14 +186,24 @@ export function EntryPage(): JSX.Element {
     // persisted entries and jump to it.
     if (smartDefaultAppliedRef.current !== weekKey) {
       smartDefaultAppliedRef.current = weekKey;
-      for (const iso of week.weekDaysISO) {
-        const hasPersisted = slots.some((s) => s.date === iso && s.rowIndex !== undefined);
-        if (!hasPersisted) {
-          if (week.selectedDate !== iso) {
-            week.setSelectedDate(iso);
-            return; // next render will fall through to the placeholder branch
+      // If a route date is provided and falls in this week, honour it instead
+      // of picking the first empty day.
+      if (requestedDateISO && week.weekDaysISO.includes(requestedDateISO)) {
+        if (week.selectedDate !== requestedDateISO) {
+          week.setSelectedDate(requestedDateISO);
+          return; // next render will fall through to the placeholder branch
+        }
+        // fall through to placeholder branch
+      } else {
+        for (const iso of week.weekDaysISO) {
+          const hasPersisted = slots.some((s) => s.date === iso && s.rowIndex !== undefined);
+          if (!hasPersisted) {
+            if (week.selectedDate !== iso) {
+              week.setSelectedDate(iso);
+              return; // next render will fall through to the placeholder branch
+            }
+            break;
           }
-          break;
         }
       }
     }
