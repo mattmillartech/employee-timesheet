@@ -31,14 +31,16 @@ export function useWeekNav(timezone: string, initialISO?: string): WeekNav {
   );
 
   const [selectedDate, setSelectedDate] = useState<string>(
-    initialISO && weekDaysISO.includes(initialISO) ? initialISO : toISODate(sunday),
+    initialDate && weekDaysISO.includes(toISODate(initialDate))
+      ? toISODate(initialDate)
+      : toISODate(sunday),
   );
 
   useEffect(() => {
-    if (!initialDate || !initialISO) return;
+    if (!initialDate) return;
     setAnchor(initialDate);
     setSelectedDate(toISODate(initialDate));
-  }, [initialDate, initialISO]);
+  }, [initialDate]);
 
   const gotoPrevWeek = useCallback((): void => {
     setAnchor((prev) => addDays(prev, -7));
