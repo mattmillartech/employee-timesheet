@@ -37,7 +37,7 @@ export function useWeekNav(timezone: string, initialISO?: string): WeekNav {
   useEffect(() => {
     if (!initialDate || !initialISO) return;
     setAnchor(initialDate);
-    setSelectedDate(initialISO);
+    setSelectedDate(toISODate(initialDate));
   }, [initialDate, initialISO]);
 
   const gotoPrevWeek = useCallback((): void => {
