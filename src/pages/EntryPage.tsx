@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { ChevronLeft, ChevronRight, Calendar } from 'lucide-react';
+import { useSearchParams } from 'react-router-dom';
 import { useSheet } from '@/contexts/SheetContext';
 import { useSheetRunner } from '@/hooks/useSheetData';
 import { useWeekNav } from '@/hooks/useWeekNav';
@@ -55,6 +56,7 @@ function newSlot(date: string, slotType: SlotType): Slot {
 export function EntryPage(): JSX.Element {
   const { sheetId, activeEmployees, settings, status } = useSheet();
   const run = useSheetRunner();
+  const [searchParams] = useSearchParams();
 
   const [selectedTab, setSelectedTab] = useState<string>('');
   const [slots, setSlots] = useState<Slot[]>([]);
@@ -62,7 +64,11 @@ export function EntryPage(): JSX.Element {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [pending, setPending] = useState<PendingMap>({});
 
-  const week = useWeekNav(settings.timezone);
+  const requestedTab = (searchParams.get('employee') ?? '').trim();
+  const requestedDate = (searchParams.get('date') ?? '').trim();
+  const requestedDateISO = parseISODate(requestedDate) ? requestedDate : undefined;
+
+  const week = useWeekNav(settings.timezone, requestedDateISO);
 
   // Ref registry — SlotRow calls registerInput(slotId, field, el) on mount/unmount,
   // EntryPage uses it to programmatically focus the "next logical field".
@@ -75,6 +81,7 @@ export function EntryPage(): JSX.Element {
   // before setSlots(fresh); the merged effect gates on it to avoid running
   // with stale data from the previous employee during the switch.
   const loadedTabRef = useRef<string>('');
+  const routeEmployeeAppliedRef = useRef(false);
 
   const registerInputFor = useCallback(
     (slotId: string) => (field: 'start' | 'end', el: HTMLInputElement | null): void => {
@@ -97,10 +104,19 @@ export function EntryPage(): JSX.Element {
 
   // Pick a sensible default employee when active list changes.
   useEffect(() => {
+    if (!routeEmployeeAppliedRef.current && requestedTab) {
+      if (activeEmployees.length === 0) return;
+      const matched = activeEmployees.find((e) => e.tabName === requestedTab);
+      routeEmployeeAppliedRef.current = true;
+      if (matched && matched.tabName !== selectedTab) {
+        setSelectedTab(matched.tabName);
+        return;
+      }
+    }
     if (selectedTab && activeEmployees.some((e) => e.tabName === selectedTab)) return;
     const first = activeEmployees[0];
     if (first) setSelectedTab(first.tabName);
-  }, [activeEmployees, selectedTab]);
+  }, [activeEmployees, requestedTab, selectedTab]);
 
   const reload = useCallback(async (): Promise<void> => {
     if (!selectedTab || !sheetId) return;
