@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { addDays, nowInTimezone, sundayOf, toISODate } from '@/lib/dateUtils';
 
 export type WeekNav = {
@@ -13,12 +13,14 @@ export type WeekNav = {
 
 export function useWeekNav(timezone: string, initialISO?: string): WeekNav {
   const todayDate = useMemo(() => nowInTimezone(timezone), [timezone]);
+  const initialDate = useMemo(() => {
+    if (!initialISO) return undefined;
+    const parts = initialISO.split('-').map(Number);
+    return new Date(parts[0] ?? 1970, (parts[1] ?? 1) - 1, parts[2] ?? 1);
+  }, [initialISO]);
 
   const [anchor, setAnchor] = useState<Date>(
-    initialISO ? (() => {
-      const parts = initialISO.split('-').map(Number);
-      return new Date(parts[0] ?? 1970, (parts[1] ?? 1) - 1, parts[2] ?? 1);
-    })() : todayDate,
+    initialDate ?? todayDate,
   );
 
   const sunday = useMemo(() => sundayOf(anchor), [anchor]);
@@ -29,8 +31,16 @@ export function useWeekNav(timezone: string, initialISO?: string): WeekNav {
   );
 
   const [selectedDate, setSelectedDate] = useState<string>(
-    initialISO && weekDaysISO.includes(initialISO) ? initialISO : toISODate(sunday),
+    initialDate && weekDaysISO.includes(toISODate(initialDate))
+      ? toISODate(initialDate)
+      : toISODate(sunday),
   );
+
+  useEffect(() => {
+    if (!initialDate) return;
+    setAnchor(initialDate);
+    setSelectedDate(toISODate(initialDate));
+  }, [initialDate]);
 
   const gotoPrevWeek = useCallback((): void => {
     setAnchor((prev) => addDays(prev, -7));

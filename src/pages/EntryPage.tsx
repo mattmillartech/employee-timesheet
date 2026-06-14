@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { ChevronLeft, ChevronRight, Calendar } from 'lucide-react';
+import { useSearchParams } from 'react-router-dom';
 import { useSheet } from '@/contexts/SheetContext';
 import { useSheetRunner } from '@/hooks/useSheetData';
 import { useWeekNav } from '@/hooks/useWeekNav';
@@ -14,7 +15,7 @@ import {
   slotToRowDerived,
   updateRow,
 } from '@/lib/sheetsApi';
-import { dayAbbrev, formatWeekRange, parseISODate } from '@/lib/dateUtils';
+import { dayAbbrev, formatWeekRange, parseISODate, toISODate } from '@/lib/dateUtils';
 import { calculateHours, formatHours, isValidHHMM } from '@/lib/timeUtils';
 import { EMPLOYEE_RANGE } from '@/lib/constants';
 import type { Slot, SlotType } from '@/types';
@@ -55,6 +56,7 @@ function newSlot(date: string, slotType: SlotType): Slot {
 export function EntryPage(): JSX.Element {
   const { sheetId, activeEmployees, settings, status } = useSheet();
   const run = useSheetRunner();
+  const [searchParams] = useSearchParams();
 
   const [selectedTab, setSelectedTab] = useState<string>('');
   const [slots, setSlots] = useState<Slot[]>([]);
@@ -62,7 +64,12 @@ export function EntryPage(): JSX.Element {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [pending, setPending] = useState<PendingMap>({});
 
-  const week = useWeekNav(settings.timezone);
+  const requestedTab = (searchParams.get('employee') ?? '').trim();
+  const requestedDate = (searchParams.get('date') ?? '').trim();
+  const parsedRequestedDate = parseISODate(requestedDate);
+  const requestedDateISO = parsedRequestedDate ? toISODate(parsedRequestedDate) : undefined;
+
+  const week = useWeekNav(settings.timezone, requestedDateISO);
 
   // Ref registry — SlotRow calls registerInput(slotId, field, el) on mount/unmount,
   // EntryPage uses it to programmatically focus the "next logical field".
@@ -75,6 +82,7 @@ export function EntryPage(): JSX.Element {
   // before setSlots(fresh); the merged effect gates on it to avoid running
   // with stale data from the previous employee during the switch.
   const loadedTabRef = useRef<string>('');
+  const routeEmployeeAppliedRef = useRef('');
 
   const registerInputFor = useCallback(
     (slotId: string) => (field: 'start' | 'end', el: HTMLInputElement | null): void => {
@@ -97,10 +105,21 @@ export function EntryPage(): JSX.Element {
 
   // Pick a sensible default employee when active list changes.
   useEffect(() => {
+    if (routeEmployeeAppliedRef.current !== requestedTab && requestedTab) {
+      if (activeEmployees.length === 0) return;
+      const matched = activeEmployees.find((e) => e.tabName === requestedTab);
+      if (matched) {
+        routeEmployeeAppliedRef.current = requestedTab;
+        if (matched.tabName !== selectedTab) {
+          setSelectedTab(matched.tabName);
+          return;
+        }
+      }
+    }
     if (selectedTab && activeEmployees.some((e) => e.tabName === selectedTab)) return;
     const first = activeEmployees[0];
     if (first) setSelectedTab(first.tabName);
-  }, [activeEmployees, selectedTab]);
+  }, [activeEmployees, requestedTab, selectedTab]);
 
   const reload = useCallback(async (): Promise<void> => {
     if (!selectedTab || !sheetId) return;
@@ -169,14 +188,24 @@ export function EntryPage(): JSX.Element {
     // persisted entries and jump to it.
     if (smartDefaultAppliedRef.current !== weekKey) {
       smartDefaultAppliedRef.current = weekKey;
-      for (const iso of week.weekDaysISO) {
-        const hasPersisted = slots.some((s) => s.date === iso && s.rowIndex !== undefined);
-        if (!hasPersisted) {
-          if (week.selectedDate !== iso) {
-            week.setSelectedDate(iso);
-            return; // next render will fall through to the placeholder branch
+      // If a route date is provided and falls in this week, honour it instead
+      // of picking the first empty day.
+      if (requestedDateISO && week.weekDaysISO.includes(requestedDateISO)) {
+        if (week.selectedDate !== requestedDateISO) {
+          week.setSelectedDate(requestedDateISO);
+          return; // next render will fall through to the placeholder branch
+        }
+        // fall through to placeholder branch
+      } else {
+        for (const iso of week.weekDaysISO) {
+          const hasPersisted = slots.some((s) => s.date === iso && s.rowIndex !== undefined);
+          if (!hasPersisted) {
+            if (week.selectedDate !== iso) {
+              week.setSelectedDate(iso);
+              return; // next render will fall through to the placeholder branch
+            }
+            break;
           }
-          break;
         }
       }
     }
@@ -189,7 +218,7 @@ export function EntryPage(): JSX.Element {
       setSlots((prev) => [...prev, fresh]);
       pendingFocusRef.current = { slotId: fresh.slotId, field: 'start' };
     }
-  }, [loading, selectedTab, slots, week]);
+  }, [loading, requestedDateISO, selectedTab, slots, week]);
 
   // Consume pendingFocusRef after each render — the new input has had a chance
   // to mount and register itself, so we can now focus it.
