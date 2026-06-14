@@ -82,7 +82,7 @@ export function EntryPage(): JSX.Element {
   // before setSlots(fresh); the merged effect gates on it to avoid running
   // with stale data from the previous employee during the switch.
   const loadedTabRef = useRef<string>('');
-  const routeEmployeeAppliedRef = useRef(false);
+  const routeEmployeeAppliedRef = useRef('');
 
   const registerInputFor = useCallback(
     (slotId: string) => (field: 'start' | 'end', el: HTMLInputElement | null): void => {
@@ -105,13 +105,15 @@ export function EntryPage(): JSX.Element {
 
   // Pick a sensible default employee when active list changes.
   useEffect(() => {
-    if (!routeEmployeeAppliedRef.current && requestedTab) {
+    if (routeEmployeeAppliedRef.current !== requestedTab && requestedTab) {
       if (activeEmployees.length === 0) return;
       const matched = activeEmployees.find((e) => e.tabName === requestedTab);
-      routeEmployeeAppliedRef.current = true;
-      if (matched && matched.tabName !== selectedTab) {
-        setSelectedTab(matched.tabName);
-        return;
+      if (matched) {
+        routeEmployeeAppliedRef.current = requestedTab;
+        if (matched.tabName !== selectedTab) {
+          setSelectedTab(matched.tabName);
+          return;
+        }
       }
     }
     if (selectedTab && activeEmployees.some((e) => e.tabName === selectedTab)) return;
@@ -216,7 +218,7 @@ export function EntryPage(): JSX.Element {
       setSlots((prev) => [...prev, fresh]);
       pendingFocusRef.current = { slotId: fresh.slotId, field: 'start' };
     }
-  }, [loading, selectedTab, slots, week]);
+  }, [loading, requestedDateISO, selectedTab, slots, week]);
 
   // Consume pendingFocusRef after each render — the new input has had a chance
   // to mount and register itself, so we can now focus it.
