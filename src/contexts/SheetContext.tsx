@@ -100,6 +100,9 @@ export function SheetProvider({ children }: { children: ReactNode }): JSX.Elemen
   // calls PATCH the same file instead of creating a duplicate. Refs are
   // fine here because callers never need to react to the value changing.
   const prefsFileIdRef = useRef<string | null>(null);
+  // Tracks the sheetId whose data is currently loaded, so the sheetId-change
+  // effect below never redundantly reloads what the bootstrap just loaded.
+  const loadedRef = useRef<string | null>(null);
 
   const setSheetId = useCallback(
     (id: string) => {
@@ -130,25 +133,38 @@ export function SheetProvider({ children }: { children: ReactNode }): JSX.Elemen
     setEmployees(list);
   }, [run, sheetId]);
 
-  const loadAll = useCallback(async (): Promise<void> => {
-    if (!sheetId) {
+  const loadAllFor = useCallback(async (id: string): Promise<void> => {
+    if (!id) {
       setStatus('error');
       setError('No sheet ID configured.');
       return;
     }
     setStatus('loading');
     setError(null);
-    try {
-      const appSettings = await run((t) => ensureSettingsTab(sheetId, t));
-      setSettings(appSettings);
-      const list = await run((t) => getEmployees(sheetId, t));
-      setEmployees(list);
-      setStatus('ready');
-    } catch (err) {
-      setStatus('error');
-      setError(err instanceof Error ? err.message : String(err));
+    // Retry transient failures (cold sidecar, Google token not yet warm on
+    // first paint, Sheets API hiccup) before surfacing an error. These
+    // transients — not a hard failure — are what made the dashboard load
+    // empty / stick on "Waiting on sheet data" until a manual refresh (#1).
+    let lastErr: unknown = null;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        const appSettings = await run((t) => ensureSettingsTab(id, t));
+        const list = await run((t) => getEmployees(id, t));
+        setSettings(appSettings);
+        setEmployees(list);
+        loadedRef.current = id;
+        setStatus('ready');
+        return;
+      } catch (err) {
+        lastErr = err;
+        await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
+      }
     }
-  }, [run, sheetId]);
+    setStatus('error');
+    setError(lastErr instanceof Error ? lastErr.message : String(lastErr));
+  }, [run]);
+
+  const loadAll = useCallback((): Promise<void> => loadAllFor(sheetId), [loadAllFor, sheetId]);
 
   const provisionNewSheet = useCallback(async (): Promise<string> => {
     if (!email) throw new Error('No signed-in user — cannot provision a sheet.');
@@ -213,7 +229,11 @@ export function SheetProvider({ children }: { children: ReactNode }): JSX.Elemen
           prefsFileIdRef.current = prefsResult.fileId;
           setSheetIdState(prefsResult.prefs.sheetId);
           if (email) persistSheetIdForUser(email, prefsResult.prefs.sheetId);
-          // loadAll runs via the [sheetId, authStatus] effect below.
+          // Load EXPLICITLY with the resolved id. Relying on the sheetId-change
+          // effect breaks when the resolved id equals the initial fallback id
+          // (React bails on identical state -> effect never fires -> status
+          // stuck on 'loading' = permanent "Waiting on sheet data"). (#1)
+          if (!cancelled) await loadAllFor(prefsResult.prefs.sheetId);
           return;
         }
         // No prefs file yet (first ever sign-in for this account, OR an
@@ -239,6 +259,7 @@ export function SheetProvider({ children }: { children: ReactNode }): JSX.Elemen
           } catch (err) {
             console.warn('[sheet-context] initial writeAppPrefs failed', err);
           }
+          if (!cancelled) await loadAllFor(fallback);
           return;
         }
 
@@ -295,6 +316,10 @@ export function SheetProvider({ children }: { children: ReactNode }): JSX.Elemen
   useEffect(() => {
     if (authStatus !== 'signed-in') return;
     if (!sheetId) return;
+    // Skip if the bootstrap (or an explicit setSheetId) already loaded this
+    // exact sheet — avoids a redundant double-fetch. Still fires when the user
+    // switches to a different sheet (loadedRef !== sheetId).
+    if (loadedRef.current === sheetId) return;
     void loadAll();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sheetId, authStatus]);
